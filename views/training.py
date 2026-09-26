@@ -150,9 +150,16 @@ def render(head, ctx):
 
     # Debug: show what training types are actually in the data
     all_types_in_data = sorted(df_all["training_type"].dropna().unique().tolist())
-    with st.expander("🔍 Debug: training types in your data", expanded=False):
+    with st.expander("🔍 Debug: training types in your data", expanded=True):
         st.code("\n".join(all_types_in_data))
         st.caption(f"MAIN_TYPES expected: {MAIN_TYPES}")
+        st.write(f"Total df_all rows: {len(df_all)} | Date range: {df_all['date'].min().date()} → {df_all['date'].max().date()}")
+        st.write(f"_comp_all rows: {len(_comp_all)} | Date range: {_comp_all['date'].min().date() if len(_comp_all) else 'empty'} → {_comp_all['date'].max().date() if len(_comp_all) else 'empty'}")
+        # Show types per month for April/May
+        if len(_comp_all):
+            apr_may = _comp_all[_comp_all["date"].dt.month.isin([4, 5])]
+            if len(apr_may):
+                st.write("Apr/May types:", apr_may.groupby("training_type")["tss"].sum().sort_values(ascending=False).to_dict())
 
     if _comp_all.empty:
         callout("No MAIN_TYPES sessions",
