@@ -144,14 +144,43 @@ def render(head, ctx):
         "correlations as hypothesis-generating, not confirmatory."
     )
 
+    # Use FULL dataset (df_all from context = unfiltered) so we see all history
+    # regardless of sidebar range/type filters.
     _comp_all = df_all[df_all["training_type"].isin(MAIN_TYPES)].copy()
-    _comp_all["_month"] = _comp_all["date"].dt.to_period("M")
-    _monthly_type_tss = _comp_all.groupby(["_month", "training_type"])["tss"].sum().reset_index()
-    _monthly_type_tss.columns = ["_month", "training_type", "type_tss"]
-    _monthly_totals = _comp_all.groupby("_month")["tss"].sum().rename("month_tss").reset_index()
-    _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month")
-    _monthly_type_tss["pct_tss"] = _monthly_type_tss["type_tss"] / _monthly_type_tss["month_tss"] * 100
-    _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
+
+    # Debug: show what training types are actually in the data
+    all_types_in_data = sorted(df_all["training_type"].dropna().unique().tolist())
+    with st.expander("🔍 Debug: training types in your data", expanded=False):
+        st.code("\n".join(all_types_in_data))
+        st.caption(f"MAIN_TYPES expected: {MAIN_TYPES}")
+
+    if _comp_all.empty:
+        callout("No MAIN_TYPES sessions",
+                f"No sessions labeled with {MAIN_TYPES}. Check the debug list above.",
+                C["yellow"], icon="🔍")
+    else:
+        _comp_all["_month"] = _comp_all["date"].dt.to_period("M")
+        _monthly_type_tss = _comp_all.groupby(["_month", "training_type"])["tss"].sum().reset_index()
+        _monthly_type_tss.columns = ["_month", "training_type", "type_tss"]
+        _monthly_totals = _comp_all.groupby("_month")["tss"].sum().rename("month_tss").reset_index()
+        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month")
+        _monthly_type_tss["pct_tss"] = _monthly_type_tss["type_tss"] / _monthly_type_tss["month_tss"] * 100
+        _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
+
+        # Ensure ALL months in range appear (even empty) for continuous x-axis
+        all_months = pd.period_range(
+            _comp_all["_month"].min(), _comp_all["_month"].max(), freq="M"
+        )
+        all_types = _monthly_type_tss["training_type"].unique()
+        grid = pd.MultiIndex.from_product([all_months, all_types], names=["_month", "training_type"])
+        _monthly_type_tss = (_monthly_type_tss.set_index(["_month", "training_type"])
+                            .reindex(grid, fill_value=0).reset_index())
+        _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
+        # Recompute totals and pct after reindex
+        _monthly_totals = _monthly_type_tss.groupby("_month")["type_tss"].sum().rename("month_tss").reset_index()
+        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month")
+        _monthly_type_tss["pct_tss"] = (_monthly_type_tss["type_tss"]
+                                        / _monthly_type_tss["month_tss"].replace(0, np.nan) * 100).fillna(0)
 
     _outcome_rows = []
     for period, grp in _comp_all.groupby("_month"):
