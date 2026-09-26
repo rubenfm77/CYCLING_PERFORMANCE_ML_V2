@@ -193,6 +193,10 @@ def render(head, ctx):
         _proxy_monthly[["_month", "ftp_proxy", "ftp_gain"]].assign(
             _month=lambda x: x["_month"].astype(str)),
         left_on="period", right_on="_month", how="left").drop(columns=["_month"], errors="ignore")
+    # Ensure merge worked (both sides string Period)
+    if "ftp_proxy" not in _outcome_df.columns:
+        _outcome_df["ftp_proxy"] = np.nan
+        _outcome_df["ftp_gain"] = np.nan
 
     fig_comp = go.Figure()
     for t in MAIN_TYPES:
