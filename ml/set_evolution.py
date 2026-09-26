@@ -1,0 +1,564 @@
+# ml/set_evolution.py — set-level "identical efforts over time". (NEW FILE)
+"""
+The intervals.icu interval-search API matches single efforts by duration ×
+intensity — but workouts are SETS ("29x 29s 323w" = a Ronnestad). This module
+rebuilds those sets from the API's group_id field (reps sharing one group_id
+belong to one set), matches sets ACROSS sessions by (rep duration × reps)
+signature, and answers "do my watts go up or down on identical work — and
+what co-moves with them?"
+
+Honesty rules kept from ml/ftp_forecast.py:
+  * everything here is DESCRIPTIVE (trend + association), no causal claims;
+  * context correlations are reported with n, after removing the time trend,
+    and only when n is large enough to say anything;
+  * "fresh vs fatigued" compares observed sets, never claims TSB caused the
+    difference (who rides fresh is not randomised).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+# Minimum pairwise observations before an association is shown at all.
+MIN_ASSOC_N = 8
+# Minimum sets per TSB side before the fresh/fatigued split is shown.
+MIN_SPLIT_N = 4
+
+SET_COLUMNS = [
+    "activity_id", "date", "_key", "reps", "rep_secs", "set_w", "set_np",
+    "set_hr", "intensity", "load", "cad", "decoupling", "first_seq",
+    "last_seq", "rest", "name", "temp", "ctl", "atl", "tsb", "tss_7",
+    "acwr", "moving_time", "act_iv_n", "act_iv_secs", "act_iv_dist",
+    "set_ss_cp_w", "set_ss_w_prime_kj", "set_w5s_cv",
+]
+
+# Duration classes for the evolution-by-duration view (same edges as the
+# power curve on the Intervals page). Labels are human durations — minutes,
+# with seconds only below 1 min (a 30 s rep IS a 30 s protocol).
+BUCKET_EDGES = [0, 30, 60, 120, 180, 300, 480, 720, 1200, 1800, 3600, 1e9]
+BUCKET_LABELS = ["0–30 s", "30–60 s", "1–2 min", "2–3 min", "3–5 min",
+                 "5–8 min", "8–12 min", "12–20 min", "20–30 min",
+                 "30–60 min", "60+ min"]
+
+
+# ── Set construction ─────────────────────────────────────────────────────────
+def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
+               df_all=None) -> pd.DataFrame:
+    """Group WORK reps into sets (group_id), with measured rest + context.
+
+    Rest = mean seconds of RECOVERY rows between consecutive reps of the set
+    — the number that separates a Ronnestad (15 s off) from a Billat (30 s).
+    Context: session temperature from the activity row; TSB/CTL/ATL and
+    prior-7-day load from df_all, merged asof-backward on the set date.
+    """
+    if iv is None or not len(iv):
+        return pd.DataFrame(columns=SET_COLUMNS)
+    w = iv[iv["iv_type"] == "WORK"].copy()
+    for c in ("secs", "avg_w", "np_w", "hr_avg", "intensity", "load",
+              "cad_avg", "decoupling"):
+        w[c] = pd.to_numeric(w[c], errors="coerce")
+    w = w.dropna(subset=["date", "secs", "avg_w"])
+    w = w[w["avg_w"] > 0]
+    if not len(w):
+        return pd.DataFrame(columns=SET_COLUMNS)
+    w["date"] = pd.to_datetime(w["date"]).dt.normalize()
+
+    # Sets = activity × group_id; grouped rows without a group_id fall back
+    # to a solo set (still comparable via signature).
+    if "group_id" not in w.columns:
+        w["group_id"] = np.nan
+    key = w["group_id"].astype("string")
+    solo = "solo:" + w["activity_id"].astype(str) + ":" + w["seq"].astype(str)
+    w["_key"] = key.where(key.notna(), solo)
+
+    sets = (w.groupby(["activity_id", "_key"], sort=False)
+            .agg(reps=("secs", "size"),
+                 rep_secs=("secs", "median"),
+                 set_w=("avg_w", "mean"),
+                 set_np=("np_w", "mean"),
+                 set_hr=("hr_avg", "mean"),
+                 intensity=("intensity", "mean"),
+                 load=("load", "sum"),
+                 cad=("cad_avg", "mean"),
+                 decoupling=("decoupling", "mean"),
+                 first_seq=("seq", "min"),
+                 last_seq=("seq", "max"),
+                 date=("date", "first"),
+                 set_ss_cp_w=("ss_cp_w", "mean"),
+                 set_ss_w_prime_kj=("ss_w_prime_kj", "mean"),
+                 set_w5s_cv=("w5s_cv", "mean"))
+            .reset_index())
+
+    # Measured rest between reps: median per-gap recovery time, counting
+    # only RECOVERY rows whose previous AND next WORK rows belong to the
+    # SAME set. That excludes pauses between different sets and lead-in
+    # false reps (a group spanning a warm-up gap would otherwise report the
+    # whole gap as "rest"), and the median resists mid-set stops.
+    tmp = iv[["activity_id", "seq", "iv_type", "secs"]].copy()
+    tmp["secs"] = pd.to_numeric(tmp["secs"], errors="coerce")
+    tmp = tmp.merge(w[["activity_id", "seq", "_key"]],
+                    on=["activity_id", "seq"], how="left")
+    tmp = tmp.sort_values(["activity_id", "seq"], kind="stable")
+    g = tmp.groupby("activity_id", sort=False)
+    tmp["_prev"] = g["_key"].ffill()          # key of previous WORK row
+    tmp["_next"] = g["_key"].bfill()           # key of next WORK row
+    tmp["_pseq"] = tmp["seq"].where(tmp["_key"].notna()).groupby(
+        tmp["activity_id"]).ffill()             # seq of previous WORK row
+    rec = tmp[(tmp["iv_type"] == "RECOVERY") & tmp["_prev"].notna() &
+              (tmp["_prev"] == tmp["_next"])].copy()
+    if len(rec):
+        per_gap = (rec.groupby(["activity_id", "_prev", "_pseq"], sort=False)
+                   ["secs"].sum().reset_index())
+        med = (per_gap.groupby(["activity_id", "_prev"], sort=False)["secs"]
+               .median().rename("rest").reset_index()
+               .rename(columns={"_prev": "_key"}))
+        sets = sets.merge(med, on=["activity_id", "_key"], how="left")
+    else:
+        sets["rest"] = np.nan
+    if "rest" not in sets.columns:
+        sets["rest"] = np.nan
+
+    # Session context (temperature, ride name) + the activity FINGERPRINT the
+    # duplicate screen needs: moving_time and the raw interval totals. Two
+    # activity rows on the same day with the same moving time AND the same
+    # interval rows are the same ride synced twice; a per-set structural match
+    # alone is NOT enough (two identical blocks in one ride, or two different
+    # rides of the same workout, look identical set by set).
+    sets["activity_id"] = sets["activity_id"].astype(str)
+    if acts is not None and len(acts):
+        a = acts.copy()
+        a["activity_id"] = a["id"].astype(str)
+        cols = ["activity_id"] + [c for c in ("name", "temp", "moving_time")
+                                  if c in a.columns]
+        sets = sets.merge(a[cols], on="activity_id", how="left")
+    else:
+        sets["name"] = ""
+        sets["moving_time"] = np.nan
+    w["distance"] = pd.to_numeric(w.get("distance"), errors="coerce")
+    fp = (w.groupby("activity_id")
+          .agg(act_iv_n=("seq", "size"),
+               act_iv_secs=("secs", "sum"),
+               act_iv_dist=("distance", "sum")).reset_index())
+    fp["act_iv_secs"] = fp["act_iv_secs"].round(0)
+    fp["act_iv_dist"] = fp["act_iv_dist"].round(0)
+    sets = sets.merge(fp, on="activity_id", how="left")
+
+    # Training-state context: TSB/CTL/ATL + prior-week load from df_all.
+    if df_all is not None and len(df_all):
+        g = df_all.sort_values("date").set_index("date")
+        try:
+            ctl = g["ctl"].resample("1D").last().ffill()
+            atl = g["atl"].resample("1D").last().ffill()
+            day_tss = g["tss"].resample("1D").sum()
+            ctx = pd.DataFrame({"ctl": ctl, "atl": atl})
+            ctx["tsb"] = ctx["ctl"] - ctx["atl"]
+            ctx["tss_7"] = day_tss.rolling(7, min_periods=1).sum().shift(1)
+            ctx["acwr"] = ctx["atl"] / ctx["ctl"].replace(0.0, np.nan)
+            ctx = ctx.reset_index().rename(columns={"index": "date"})
+            if "date" not in ctx.columns and g.index.name:
+                ctx = ctx.rename(columns={g.index.name: "date"})
+            sets = sets.sort_values("date")
+            sets = pd.merge_asof(sets, ctx, on="date", direction="backward")
+        except Exception:
+            for c in ("ctl", "atl", "tsb", "tss_7", "acwr"):
+                if c not in sets.columns:
+                    sets[c] = np.nan
+    for c in ("ctl", "atl", "tsb", "tss_7", "acwr", "temp"):
+        if c not in sets.columns:
+            sets[c] = np.nan
+    return sets.reset_index(drop=True)
+
+
+# ── Data-quality gates ───────────────────────────────────────────────────────
+# intervals.icu's detector is good, not perfect. This cache contained exactly
+# two kinds of problem worth acting on, and one field that is simply unreliable:
+#   1. the same ride present twice — a named activity AND an auto-named
+#      "Cycling" copy, same day, same moving time, same raw interval rows
+#      (4 confirmed pairs). Counting both would double-count the workout, so
+#      the whole duplicate activity is removed;
+#   2. efforts HOURS apart sharing one group_id — a "2 × 3 min set" with a
+#      49-minute gap is two separate efforts, so the set average and the rest
+#      figure are both invalid: excluded;
+#   3. sub-15 s reps and IF above 150 % are a broken FIELD (intervals.icu
+#      extrapolates a 20-min equivalent from very short efforts, so a 30-s rep
+#      can read 120-150 % IF). The watts are still real, so these sets are
+#      KEPT and FLAGGED, and their intensity band is reported as unusable
+#      instead of being silently averaged into a conclusion.
+# Nothing is dropped silently: every excluded set and every flag is counted,
+# labelled with its reason and listed in the UI.
+MAX_PROTOCOL_REST_S = 90.0      # multi-rep sets need plausible recovery …
+MAX_PROTOCOL_REST_FACTOR = 1.5  # … either ≤ 90 s or ≤ 1.5 × the rep length
+MIN_PROTOCOL_REP_S = 15.0       # shorter spikes: IF unreliable, watts fine
+MAX_PLAUSIBLE_IF = 150.0        # > 150 % IF comes from very short rows
+DEDUPE_MT_TOL_S = 60.0          # duplicate ride: same moving time ± 60 s …
+DEDUPE_IV_TOL_S = 30.0          # … and same total interval seconds ± 30 s
+DEDUPE_DIST_TOL_M = 300.0       # … and same interval distance ± 300 m
+
+DUP_REASON = "duplicate ride (synced twice)"
+GAP_REASON = "gaps too long — not one protocol"
+SHORT_FLAG = "sub-15 s reps — IF unusable"
+IF_FLAG = "IF > 150 % — model artefact on short efforts"
+SHORT_BAND = "n/a — IF unreliable below 45 s"
+BROKEN_IF_BAND = "n/a — IF model artefact"
+
+QUALITY_REASONS = {
+    DUP_REASON: "same day, same moving time and the same raw interval "
+                "rows as another activity — the ride is in the cache twice",
+    GAP_REASON: "reps sit minutes-to-hours apart; one block, not an "
+                "interval set — the average and the rest figure are invalid",
+    SHORT_FLAG: "detector rows under 15 s: watts kept, intensity discarded",
+    IF_FLAG: "IF above 150 % comes from the duration model on a very short "
+             "effort: watts kept, intensity discarded",
+}
+REPORT_COLUMNS = ["Reason", "Action", "Sets", "Sessions", "What it means"]
+
+
+def quality_gates(sets: pd.DataFrame):
+    """Split sets into (clean, report, excluded) — a reason per excluded row
+    and a flag per unreliable-intensity row. `report` is the small DataFrame
+    (reason → action, sets, sessions) the UI prints; `excluded` lists every
+    removed set; the kept sets carry `q_flag` ("" when clean)."""
+    if sets is None or not len(sets):
+        empty = pd.DataFrame(columns=REPORT_COLUMNS)
+        return sets, empty, sets
+    s = sets.copy()
+    s["date"] = pd.to_datetime(s["date"]).dt.normalize()
+    reps = pd.to_numeric(s["reps"], errors="coerce")
+    rep_secs = pd.to_numeric(s["rep_secs"], errors="coerce")
+    rest = pd.to_numeric(s.get("rest"), errors="coerce")
+    inten = pd.to_numeric(s.get("intensity"), errors="coerce")
+    multi = reps >= 2
+
+    # 1 — duplicate rides, decided at ACTIVITY level, not set level
+    dup_act = pd.Series(False, index=s.index)
+    have_fp = {"moving_time", "act_iv_n", "act_iv_secs"}.issubset(s.columns)
+    if have_fp:
+        mt = pd.to_numeric(s["moving_time"], errors="coerce")
+        n_iv = pd.to_numeric(s["act_iv_n"], errors="coerce")
+        iv_s = pd.to_numeric(s["act_iv_secs"], errors="coerce")
+        per_act = (pd.DataFrame({"activity_id": s["activity_id"],
+                                 "day": s["date"].dt.strftime("%Y-%m-%d"),
+                                 "mt": mt, "n_iv": n_iv, "iv_s": iv_s})
+                   .drop_duplicates("activity_id"))
+        # same day · same moving time · same interval row count · same total
+        # interval seconds  →  one ride, two activity rows
+        fp = (per_act["day"] + "|" +
+              (per_act["mt"] / DEDUPE_MT_TOL_S).round().fillna(-1)
+              .astype("int64").astype(str) + "|" +
+              per_act["n_iv"].fillna(-1).astype("int64").astype(str) + "|" +
+              (per_act["iv_s"] / DEDUPE_IV_TOL_S).round().fillna(-1)
+              .astype("int64").astype(str))
+        per_act = per_act.assign(fp=fp.values)
+        per_act = per_act[per_act["mt"].notna() & per_act["n_iv"].notna()
+                          & (per_act["n_iv"] > 0)]
+        drop_acts = (per_act[per_act.duplicated("fp", keep="first")]
+                     ["activity_id"].unique())
+        dup_act = s["activity_id"].isin(drop_acts)
+
+    # 2 — multi-rep sets whose reps are minutes-to-hours apart
+    too_gappy = multi & (rest > np.maximum(MAX_PROTOCOL_REST_S,
+                                           MAX_PROTOCOL_REST_FACTOR * rep_secs))
+
+    why = pd.Series("", index=s.index, dtype="object")
+    why = why.mask(dup_act, DUP_REASON)
+    why = why.mask(why.eq("") & too_gappy, GAP_REASON)
+
+    # 3 — unreliable FIELDS: flagged, never deleted
+    flag = pd.Series("", index=s.index, dtype="object")
+    spike = multi & (rep_secs < MIN_PROTOCOL_REP_S)
+    artefact = inten > MAX_PLAUSIBLE_IF
+    flag = flag.mask(spike, SHORT_FLAG)
+    flag = flag.mask(flag.eq("") & artefact, IF_FLAG)
+
+    s["q_why"] = why
+    s["q_flag"] = flag
+    clean = (s[s["q_why"] == ""]
+             .drop(columns=["q_why"]).reset_index(drop=True))
+    dropped = s[s["q_why"] != ""].reset_index(drop=True)
+    kept_flagged = clean[clean["q_flag"] != ""]
+
+    rows = []
+    for reason in dropped["q_why"].value_counts().index:
+        g = dropped[dropped["q_why"] == reason]
+        rows.append({"Reason": reason, "Action": "excluded",
+                     "Sets": len(g), "Sessions": int(g["date"].nunique()),
+                     "What it means": QUALITY_REASONS.get(reason, "")})
+    for reason in kept_flagged["q_flag"].value_counts().index:
+        g = kept_flagged[kept_flagged["q_flag"] == reason]
+        rows.append({"Reason": reason, "Action": "flagged (kept)",
+                     "Sets": len(g), "Sessions": int(g["date"].nunique()),
+                     "What it means": QUALITY_REASONS.get(reason, "")})
+    report = (pd.DataFrame(rows, columns=REPORT_COLUMNS)
+              .sort_values(["Action", "Sets"], ascending=[True, False])
+              if rows else pd.DataFrame(columns=REPORT_COLUMNS))
+    return clean, report.reset_index(drop=True), dropped
+
+
+# ── Signature matching across sessions ───────────────────────────────────────
+def _dur_label(secs: float) -> str:
+    """Human duration for protocol labels: seconds under 90 s, WHOLE minutes
+    above (the user rule — no decimals in time, and a 30 s interval is never
+    "0 min"). Halves DOWN, the same class rule as dur_bucket, so the label and
+    the group always agree."""
+    try:
+        s = float(secs)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 90:
+        return f"{s:.0f} s"
+    return f"{np.ceil(s / 60.0 - 0.5):.0f} min"
+
+
+def _sig_label(reps_b: int, secs: float) -> str:
+    """Grouping label for the identical-sets dropdown: whole minutes, no
+    decimals — plus the exact rep length in seconds, because whole minutes
+    alone are NOT unique here. Groups are 10-second buckets, so '3 min' is
+    shared by six different groups (190 groups collapse to 93 whole-minute
+    labels) and two entries in the dropdown would read identically. The
+    seconds disambiguate without putting a decimal back in the minutes."""
+    lab = _dur_label(secs)
+    if secs >= 90:
+        return f"{reps_b} × {lab} · {secs:.0f} s"
+    return f"{reps_b} × {lab}"
+
+
+def _bucket(value: float, step: float) -> int:
+    """Nearest-step bucket (half-up, not banker's rounding)."""
+    return int(np.floor(float(value) / step + 0.5) * step)
+
+
+def _style(rep_secs, reps, rest) -> str:
+    """Heuristic family name from rep length + measured rest + reps.
+
+    Raw numbers are always shown next to the label — these are protocol
+    patterns, not labels typed by intervals.icu.
+    """
+    try:
+        rep_secs = float(rep_secs)
+        reps = int(reps)
+    except (TypeError, ValueError):
+        return ""
+    rest = float(rest) if rest is not None and not np.isnan(rest) else np.nan
+    if 24 <= rep_secs <= 40 and reps >= 8:
+        if not np.isnan(rest):
+            if 10 <= rest <= 22 and reps >= 15:
+                return "Ronnestad-style (30 s on / 15 s off)"
+            if 23 <= rest <= 45:
+                return "Billat-style (30 s on / 30 s off)"
+        return "micro-reps"
+    if 240 <= rep_secs <= 420 and 2 <= reps <= 8:
+        return "FTP / threshold sets"
+    if 140 <= rep_secs < 240 and 2 <= reps <= 8:
+        return "VO₂ max sets"
+    if rep_secs < 15 and reps <= 6:
+        return "sprints"
+    if rep_secs >= 600:
+        return "long efforts"
+    return ""
+
+
+def add_signatures(sets: pd.DataFrame):
+    """Add sig/style columns; return (sets, cluster table sorted by usage)."""
+    s = sets.copy()
+    if not len(s):
+        return s, pd.DataFrame(columns=["sig", "n_sets", "n_days", "rep_secs",
+                                        "reps", "rest", "best", "style",
+                                        "first", "last"])
+    rep = s["rep_secs"].astype(float)
+    reps = s["reps"].astype(int)
+    rep_b = [_bucket(r, 5 if r <= 90 else 10) for r in rep]
+    reps_b = [r if r <= 10 else _bucket(r, 5) for r in reps]
+    s["rep_b"] = rep_b
+    s["reps_b"] = reps_b
+    s["sig"] = [_sig_label(nb, rb) for rb, nb in zip(rep_b, reps_b)]
+    s["style"] = [_style(r, n, t)
+                  for r, n, t in zip(s["rep_secs"], s["reps"], s["rest"])]
+
+    clusters = (s.groupby("sig", sort=False)
+                .agg(n_sets=("set_w", "size"),
+                     n_days=("date", "nunique"),
+                     rep_secs=("rep_secs", "median"),
+                     reps=("reps", "median"),
+                     rest=("rest", "median"),
+                     best=("set_w", "max"),
+                     first=("date", "min"),
+                     last=("date", "max"))
+                .reset_index())
+    mode = s.groupby("sig", sort=False)["style"].agg(
+        lambda x: x.value_counts().idxmax() if len(x) else "")
+    clusters["style"] = clusters["sig"].map(mode)
+    # Multi-rep SETS first (the workouts: Ronnestad/Billat/FTP), singles after.
+    clusters["_single"] = (clusters["reps"] <= 1).astype(int)
+    clusters = clusters.sort_values(["_single", "n_days", "n_sets"],
+                                    ascending=[True, False, False])
+    clusters = clusters.drop(columns="_single").reset_index(drop=True)
+    return s, clusters
+
+
+# ── Trend + context for one matched signature ────────────────────────────────
+def run_set_evolution(s: pd.DataFrame) -> dict:
+    """Descriptive trend + context associations for one matched set type."""
+    s = s.sort_values("date").reset_index(drop=True)
+    n = len(s)
+    n_days = int(s["date"].nunique())
+    if n < 3:
+        return {"ok": False,
+                "reason": f"Only {n} sets match this signature — a trend "
+                          f"needs at least 3. Pick a more common set type."}
+
+    t = (s["date"] - s["date"].iloc[0]).dt.days.astype(float).to_numpy()
+    y = s["set_w"].astype(float).to_numpy()
+    span_days = float(t[-1] - t[0])
+
+    if np.ptp(t) > 0 and np.ptp(y) > 0:
+        slope_d, icept = float(np.polyfit(t, y, 1)[0]), float(
+            np.polyfit(t, y, 1)[1])
+        r_time = float(np.corrcoef(t, y)[0, 1])
+    else:
+        slope_d, icept = 0.0, float(np.mean(y))
+        r_time = float("nan")
+    slope_m = slope_d * 30.44                      # W per month
+    resid = y - (slope_d * t + icept)
+    rho = float(pd.DataFrame({"t": t, "y": y}).corr(method="spearman")
+                .iloc[0, 1]) if np.ptp(t) > 0 and np.ptp(y) > 0 else float("nan")
+
+    trend = pd.DataFrame({"date": s["date"],
+                          "y_hat": slope_d * t + icept})
+
+    # Context associations with the detrended power residual.
+    ctx_vars = [
+        ("temp", "Session temperature (°C)"),
+        ("tsb", "TSB — freshness before the ride"),
+        ("ctl", "CTL — chronic load (fitness)"),
+        ("acwr", "Acute:chronic load ratio"),
+        ("tss_7", "TSS in the prior 7 days"),
+        ("set_hr", "Set average HR (bpm)"),
+        ("decoupling", "Set HR decoupling (%)"),
+        ("set_ss_cp_w", "Set CP estimate (W)"),
+        ("set_ss_w_prime_kj", "Set W' estimate (kJ)"),
+        ("set_w5s_cv", "Set w5s CV (fraction)"),
+    ]
+    rows = []
+    for col, label in ctx_vars:
+        if col not in s.columns:
+            continue
+        pair = pd.DataFrame({"r": resid,
+                             "v": pd.to_numeric(s[col], errors="coerce")}
+                            ).dropna()
+        if len(pair) < MIN_ASSOC_N or pair["v"].nunique() < 3:
+            continue
+        r = float(pair.corr().iloc[0, 1])
+        if np.isnan(r):
+            continue
+        rows.append({"Context": label, "r": round(r, 2),
+                     "n": int(len(pair)),
+                     "Moves with power": ("higher together" if r > 0
+                                          else "opposite directions")})
+    assoc = (pd.DataFrame(rows).sort_values("r", key=lambda c: c.abs(),
+                                            ascending=False).reset_index(
+        drop=True)
+        if rows else pd.DataFrame(
+        columns=["Context", "r", "n", "Moves with power"]))
+
+    # Fresh vs fatigued split (descriptive, observed sets only).
+    fatigue = None
+    if "tsb" in s.columns:
+        tsb = pd.to_numeric(s["tsb"], errors="coerce")
+        fresh = y[(tsb >= 0).to_numpy()]
+        tired = y[(tsb <= -10).to_numpy()]
+        if len(fresh) >= MIN_SPLIT_N and len(tired) >= MIN_SPLIT_N:
+            fatigue = {
+                "fresh_n": int(len(fresh)), "fresh_med": float(np.median(fresh)),
+                "tired_n": int(len(tired)),
+                "tired_med": float(np.median(tired)),
+                "fresh_vals": [float(v) for v in fresh],
+                "tired_vals": [float(v) for v in tired],
+            }
+
+    # Recent vs previous best of the SAME signature (last 28 days).
+    now = pd.Timestamp.now().normalize()
+    recent = s[s["date"] >= now - pd.Timedelta(days=28)]
+    before = s[s["date"] < now - pd.Timedelta(days=28)]
+    d_best = (float(recent["set_w"].max()) - float(before["set_w"].max())
+              ) if len(recent) and len(before) else None
+
+    return {
+        "ok": True, "sets": s, "trend": trend,
+        "n": n, "n_days": n_days, "span_days": span_days,
+        "best": float(s["set_w"].max()),
+        "best_row": s.loc[s["set_w"].idxmax()],
+        "last": pd.Timestamp(s["date"].max()),
+        "slope_m": slope_m, "r_time": r_time, "rho": rho, "resid": resid,
+        "assoc": assoc, "fatigue": fatigue, "d_best": d_best,
+    }
+
+
+# ── Evolution by duration class ──────────────────────────────────────────────
+def run_duration_evolution(iv: pd.DataFrame) -> dict:
+    """Monthly best watts per duration class: heatmap data + per-class trend."""
+    if iv is None or not len(iv):
+        return {"ok": False, "reason": "No interval rows cached yet."}
+    w = iv[iv["iv_type"] == "WORK"].copy()
+    w["secs"] = pd.to_numeric(w["secs"], errors="coerce")
+    w["avg_w"] = pd.to_numeric(w["avg_w"], errors="coerce")
+    w = w.dropna(subset=["date", "secs", "avg_w"])
+    if not len(w):
+        return {"ok": False, "reason": "No WORK intervals in this range."}
+    w["date"] = pd.to_datetime(w["date"])
+    w["bucket"] = pd.cut(w["secs"], bins=BUCKET_EDGES, labels=BUCKET_LABELS,
+                         right=False)
+    w = w.dropna(subset=["bucket"])
+    w["month"] = w["date"].dt.to_period("M").astype(str)
+
+    best = (w.groupby(["bucket", "month"], observed=True)["avg_w"].max()
+            .unstack("month"))
+    cnt = (w.groupby(["bucket", "month"], observed=True)["avg_w"].size()
+           .unstack("month").reindex(index=best.index, columns=best.columns))
+    if not len(best):
+        return {"ok": False, "reason": "No WORK intervals in this range."}
+
+    # Row-normalise (each duration class coloured by its own worst→best) so
+    # a 600 W sprint row and a 200 W tempo row are comparable at a glance.
+    # Cells with no data stay NaN (blank), only a perfectly flat class gets
+    # a uniform mid colour.
+    rmin = best.min(axis=1)
+    rmax = best.max(axis=1)
+    rng = (rmax - rmin).replace(0.0, np.nan)
+    z = ((best.sub(rmin, axis=0)).div(rng, axis=0) * 100)
+    flat_rows = rng[rng.isna()].index
+    if len(flat_rows):
+        z.loc[flat_rows, :] = 50.0
+
+    # Descriptive slope of the monthly bests (W/month), ≥ 4 populated months.
+    slopes, months_n = {}, {}
+    x_all = np.arange(len(best.columns), dtype=float)
+    for lab, row in best.iterrows():
+        mask = row.notna().to_numpy()
+        months_n[lab] = int(mask.sum())
+        if mask.sum() >= 4 and np.ptp(x_all[mask]) > 0:
+            slopes[lab] = float(np.polyfit(x_all[mask], row[mask], 1)[0])
+        else:
+            slopes[lab] = np.nan
+
+    tbl = pd.DataFrame({
+        "Duration class": list(best.index),
+        "W / month": [round(s, 2) if not np.isnan(s) else None
+                      for s in (slopes[lab] for lab in best.index)],
+        "Months": [months_n[lab] for lab in best.index],
+        "Best ever (W)": [round(float(best.loc[lab].max()), 0)
+                          for lab in best.index],
+        "Trend": [("↑" if (not np.isnan(slopes[lab]) and slopes[lab] >= 1)
+                   else "↓" if (not np.isnan(slopes[lab]) and slopes[lab] <= -1)
+                   else "→" if not np.isnan(slopes[lab]) else "·")
+                  for lab in best.index],
+    })
+
+    return {
+        "ok": True, "z": z.to_numpy(), "best": best, "count": cnt,
+        "months": list(best.columns), "labels": [str(x) for x in best.index],
+        "text": [[("" if pd.isna(v) else f"{v:.0f}")
+                  for v in row] for row in best.to_numpy()],
+        "count_arr": cnt.fillna(0).to_numpy().astype(int),
+        "table": tbl, "n_work": int(len(w)),
+    }

@@ -1,0 +1,16 @@
+# Streamlit theme — matches the original app.py palette exactly
+# (#0d1117 / #161b22 / #58a6ff) so both dashboards look like siblings.
+
+[theme]
+base = "dark"
+primaryColor = "#58a6ff"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#c9d1d9"
+font = "sans serif"
+
+[server]
+maxMessageSize = 200
+
+[browser]
+gatherUsageStats = false
