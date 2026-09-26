@@ -189,14 +189,15 @@ def render(head, ctx):
     _proxy_monthly["ftp_trend"] = _proxy_monthly["ftp_proxy"].rolling(3, min_periods=2).mean()
     _proxy_monthly["ftp_gain"] = _proxy_monthly["ftp_proxy"].diff()
 
+    _proxy_monthly = _proxy_monthly.copy()
+    _proxy_monthly["_month_str"] = _proxy_monthly["_month"].astype(str)
+    _outcome_df = _outcome_df.copy()
+    _outcome_df["period_str"] = _outcome_df["period"].astype(str)
+
     _outcome_df = _outcome_df.merge(
-        _proxy_monthly[["_month", "ftp_proxy", "ftp_gain"]].assign(
-            _month=lambda x: x["_month"].astype(str)),
-        left_on="period", right_on="_month", how="left").drop(columns=["_month"], errors="ignore")
-    # Ensure merge worked (both sides string Period)
-    if "ftp_proxy" not in _outcome_df.columns:
-        _outcome_df["ftp_proxy"] = np.nan
-        _outcome_df["ftp_gain"] = np.nan
+        _proxy_monthly[["_month_str", "ftp_proxy", "ftp_gain"]],
+        left_on="period_str", right_on="_month_str", how="left"
+    ).drop(columns=["_month_str", "period_str"], errors="ignore")
 
     fig_comp = go.Figure()
     for t in MAIN_TYPES:
