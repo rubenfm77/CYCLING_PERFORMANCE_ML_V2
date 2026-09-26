@@ -1,6 +1,6 @@
 # cycling-performance-ml
 data/*.xlsx
-data/*.csv
+data/interval_cache.csv
 outputs/
 __pycache__/
 *.pyc
