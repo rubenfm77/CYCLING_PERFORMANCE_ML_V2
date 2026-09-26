@@ -177,6 +177,8 @@ def render(head, ctx):
             "combo": "+".join(sorted(tss_by_type.nlargest(3).index.tolist())),
         })
     _outcome_df = pd.DataFrame(_outcome_rows)
+    if _outcome_df.empty:
+        _outcome_df = pd.DataFrame(columns=["period", "total_tss", "quality_pct", "pattern", "combo"])
 
     _df_proxy = df_all.copy()
     _df_proxy["_pwr"] = pd.to_numeric(df_all["power_np"].fillna(df_all["power_avg"]), errors="coerce")
