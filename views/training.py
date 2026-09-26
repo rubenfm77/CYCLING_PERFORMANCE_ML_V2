@@ -201,37 +201,47 @@ def render(head, ctx):
         left_on="period_str", right_on="_month_str", how="left"
     ).drop(columns=["_month_str", "period_str"], errors="ignore")
 
-    fig_comp = go.Figure()
-    for t in MAIN_TYPES:
-        t_data = _monthly_type_tss[_monthly_type_tss["training_type"] == t].sort_values("month_dt")
-        if len(t_data) == 0:
-            continue
-        fig_comp.add_trace(go.Bar(
-            x=t_data["month_dt"], y=t_data["pct_tss"], name=t,
-            marker_color=TYPE_COLORS.get(t, C["muted"]), opacity=0.85,
-            hovertemplate=f"<b>{t}</b><br>%{{y:.1f}}% of TSS<br>%{{x|%b %Y}}<extra></extra>"))
-    fig_comp.update_layout(barmode="stack")
-    style_figure(fig_comp, "Monthly composition — % TSS by type (all time)", H_STD)
-    legend(fig_comp, "left", horizontal=True, size=10)
-    show(fig_comp)
+    # Chart 1: Monthly composition — only if data exists
+    if len(_monthly_type_tss) > 0:
+        fig_comp = go.Figure()
+        for t in MAIN_TYPES:
+            t_data = _monthly_type_tss[_monthly_type_tss["training_type"] == t].sort_values("month_dt")
+            if len(t_data) == 0:
+                continue
+            fig_comp.add_trace(go.Bar(
+                x=t_data["month_dt"], y=t_data["pct_tss"], name=t,
+                marker_color=TYPE_COLORS.get(t, C["muted"]), opacity=0.85,
+                hovertemplate=f"<b>{t}</b><br>%{{y:.1f}}% of TSS<br>%{{x|%b %Y}}<extra></extra>"))
+        fig_comp.update_layout(barmode="stack")
+        style_figure(fig_comp, "Monthly composition — % TSS by type (all time)", H_STD)
+        legend(fig_comp, "left", horizontal=True, size=10)
+        show(fig_comp)
+    else:
+        callout("No data", "No training types from MAIN_TYPES found in this range.",
+                C["muted"], icon="ℹ️")
 
-    fig_ref = go.Figure()
-    fig_ref.add_trace(go.Scatter(
-        x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_proxy"], mode="lines+markers",
-        name="FTP proxy (best NP × 0.95)", line=dict(color=C["purple"], width=2.5),
-        marker=dict(size=4), fill="tozeroy", fillcolor="rgba(188,140,255,0.08)"))
-    fig_ref.add_trace(go.Scatter(
-        x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_trend"], mode="lines",
-        name="3-month trend", line=dict(color=C["accent"], width=2, dash="dash")))
-    fig_ref.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.5,
-                      annotation_text=f"{FTP_TARGET} W peak")
-    fig_ref.add_hline(y=FTP_CURRENT, line_dash="dot", line_color=C["yellow"],
-                      annotation_text=f"{FTP_CURRENT} W current")
-    fig_ref.add_vline(x=pd.Timestamp(SURGERY), line_dash="dash",
-                      line_color=C["red"], opacity=0.7, annotation_text="Surgery")
-    style_figure(fig_ref, "FTP proxy — correlate with the composition bars above", H_CARD)
-    legend(fig_ref, "left", horizontal=True)
-    show(fig_ref)
+    # Chart 2: FTP proxy — only if data exists
+    if len(_proxy_monthly) > 0:
+        fig_ref = go.Figure()
+        fig_ref.add_trace(go.Scatter(
+            x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_proxy"], mode="lines+markers",
+            name="FTP proxy (best NP × 0.95)", line=dict(color=C["purple"], width=2.5),
+            marker=dict(size=4), fill="tozeroy", fillcolor="rgba(188,140,255,0.08)"))
+        fig_ref.add_trace(go.Scatter(
+            x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_trend"], mode="lines",
+            name="3-month trend", line=dict(color=C["accent"], width=2, dash="dash")))
+        fig_ref.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.5,
+                          annotation_text=f"{FTP_TARGET} W peak")
+        fig_ref.add_hline(y=FTP_CURRENT, line_dash="dot", line_color=C["yellow"],
+                          annotation_text=f"{FTP_CURRENT} W current")
+        fig_ref.add_vline(x=pd.Timestamp(SURGERY), line_dash="dash",
+                          line_color=C["red"], opacity=0.7, annotation_text="Surgery")
+        style_figure(fig_ref, "FTP proxy — correlate with the composition bars above", H_CARD)
+        legend(fig_ref, "left", horizontal=True)
+        show(fig_ref)
+    else:
+        callout("No data", "No power data > 50 W found for FTP proxy.",
+                C["muted"], icon="ℹ️")
 
     section("Pattern vs next-month FTP change")
     cc = st.columns(2)
