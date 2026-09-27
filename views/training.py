@@ -138,109 +138,88 @@ def render(head, ctx):
     # ── Training composition analysis ──────────────────────────────────────
     section("🔀 Training composition — does the mix predict FTP?")
     st.caption(
-        "Each bar is % TSS by training type per month; the FTP proxy below lets "
-        "you spot which composition periods preceded real peaks (e.g. the 275 W "
-        "era). ⚠️ ~72 independent monthly observations over 6 years — treat "
-        "correlations as hypothesis-generating, not confirmatory."
+        "Each bar is % TSS by training type per month. Months are independent "
+        "observations but the *count* is small, so treat anything below as "
+        "hypothesis-generating, not confirmatory. This section always uses your "
+        "full history, ignoring the sidebar range."
     )
 
-    # Use FULL dataset (df_all from context = unfiltered) so we see all history
-    # regardless of sidebar range/type filters.
+    # Composition analysis deliberately uses the FULL history (df_all) rather than
+    # the sidebar window: "does the mix predict FTP?" is a long-term question, so it
+    # gets a long-term answer regardless of the date-range picker.
     _comp_all = df_all[df_all["training_type"].isin(MAIN_TYPES)].copy()
 
-    # Debug: show what training types are actually in the data
-    all_types_in_data = sorted(df_all["training_type"].dropna().unique().tolist())
-    with st.expander("🔍 Debug: training types in your data", expanded=True):
-        st.code("\n".join(all_types_in_data))
-        st.caption(f"MAIN_TYPES expected: {MAIN_TYPES}")
-        st.write(f"Total df_all rows: {len(df_all)} | Date range: {df_all['date'].min().date()} → {df_all['date'].max().date()}")
-        st.write(f"_comp_all rows: {len(_comp_all)} | Date range: {_comp_all['date'].min().date() if len(_comp_all) else 'empty'} → {_comp_all['date'].max().date() if len(_comp_all) else 'empty'}")
-        # Show types per month for April/May
-        if len(_comp_all):
-            apr_may = _comp_all[_comp_all["date"].dt.month.isin([4, 5])]
-            if len(apr_may):
-                st.write("Apr/May types:", apr_may.groupby("training_type")["tss"].sum().sort_values(ascending=False).to_dict())
-
     if _comp_all.empty:
-        callout("No MAIN_TYPES sessions",
-                f"No sessions labeled with {MAIN_TYPES}. Check the debug list above.",
+        callout("No labelled training types",
+                "No session carries one of the MAIN_TYPES labels, so there is no "
+                "composition to analyse.",
                 C["yellow"], icon="🔍")
+        _monthly_type_tss = pd.DataFrame(
+            columns=["month_dt", "training_type", "type_tss", "pct_tss"])
     else:
         _comp_all["_month"] = _comp_all["date"].dt.to_period("M")
-        _monthly_type_tss = _comp_all.groupby(["_month", "training_type"])["tss"].sum().reset_index()
-        _monthly_type_tss.columns = ["_month", "training_type", "type_tss"]
-        _monthly_totals = _comp_all.groupby("_month")["tss"].sum().rename("month_tss").reset_index()
-        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month")
-        _monthly_type_tss["pct_tss"] = _monthly_type_tss["type_tss"] / _monthly_type_tss["month_tss"] * 100
-        _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
+        # % of that month's TSS. groupby.transform() gives the monthly denominator
+        # in place, so no second frame and no merge.
+        _mt = (_comp_all.groupby(["_month", "training_type"], as_index=False)["tss"]
+               .sum().rename(columns={"tss": "type_tss"}))
+        _mt["month_tss"] = _mt.groupby("_month")["type_tss"].transform("sum")
+        _mt["pct_tss"] = (_mt["type_tss"]
+                          / _mt["month_tss"].replace(0, np.nan) * 100).fillna(0.0)
+        _mt["month_dt"] = _mt["_month"].dt.to_timestamp()
+        _monthly_type_tss = _mt
 
-        # Ensure ALL months in range appear (even empty) for continuous x-axis
-        all_months = pd.period_range(
-            _comp_all["_month"].min(), _comp_all["_month"].max(), freq="M"
-        )
-        all_types = _monthly_type_tss["training_type"].unique()
-        grid = pd.MultiIndex.from_product([all_months, all_types], names=["_month", "training_type"])
-        _monthly_type_tss = (_monthly_type_tss.set_index(["_month", "training_type"])
-                            .reindex(grid, fill_value=0).reset_index())
-        _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
-        # Recompute totals and pct after reindex
-        _monthly_totals = _monthly_type_tss.groupby("_month")["type_tss"].sum().rename("month_tss").reset_index()
-        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month", how="left")
-        # Safe pct_tss - just check column exists
-        if "month_tss" in _monthly_type_tss.columns:
-            denom = _monthly_type_tss["month_tss"].replace(0, np.nan)
-            _monthly_type_tss["pct_tss"] = (_monthly_type_tss["type_tss"] / denom * 100).fillna(0)
-        else:
-            _monthly_type_tss["pct_tss"] = 0.0
-            _monthly_type_tss["month_tss"] = 0.0
-
+    # Per-month training "pattern" summary — the regressor for the FTP-gain tables.
     _outcome_rows = []
     for period, grp in _comp_all.groupby("_month"):
-        total_tss = grp["tss"].sum()
-        if total_tss == 0:
+        total_tss = float(grp["tss"].sum())
+        if total_tss <= 0:
             continue
         tss_by_type = grp.groupby("training_type")["tss"].sum()
-        q_grp = grp[grp["training_type"].isin(FTP_DRIVERS)]
-        q_tss = q_grp["tss"].sum()
-        q_by_type = q_grp.groupby("training_type")["tss"].sum()
-        if len(q_by_type) > 0 and q_tss > 0:
-            qdom_pct = float(q_by_type.max() / q_tss * 100)
+        q_by_type = grp[grp["training_type"].isin(FTP_DRIVERS)].groupby("training_type")["tss"].sum()
+        q_tss = float(q_by_type.sum())
+        if q_tss > 0:
             qdom = q_by_type.idxmax()
-            pattern = f"Single: {qdom}" if qdom_pct > 50 else \
-                "Mixed: " + "+".join(sorted(q_by_type.nlargest(2).index.tolist()))
+            pattern = (f"Single: {qdom}" if float(q_by_type.max()) / q_tss * 100 > 50
+                       else "Mixed: " + "+".join(sorted(q_by_type.nlargest(2).index)))
         else:
             pattern = "No quality sessions"
         _outcome_rows.append({
             "period": str(period),
             "total_tss": total_tss,
-            "quality_pct": q_tss / total_tss * 100 if total_tss > 0 else 0,
+            "quality_pct": q_tss / total_tss * 100,
             "pattern": pattern,
-            "combo": "+".join(sorted(tss_by_type.nlargest(3).index.tolist())),
+            "combo": "+".join(sorted(tss_by_type.nlargest(3).index)),
         })
-    _outcome_df = pd.DataFrame(_outcome_rows)
-    if _outcome_df.empty:
-        _outcome_df = pd.DataFrame(columns=["period", "total_tss", "quality_pct", "pattern", "combo"])
+    _outcome_df = pd.DataFrame(_outcome_rows, columns=["period", "total_tss",
+                                                       "quality_pct", "pattern", "combo"])
+    if not _outcome_df.empty:
+        _outcome_df["_month"] = pd.PeriodIndex(_outcome_df["period"], freq="M")
 
-    _df_proxy = df_all.copy()
-    _df_proxy["_pwr"] = pd.to_numeric(df_all["power_np"].fillna(df_all["power_avg"]), errors="coerce")
-    _df_proxy["_month"] = _df_proxy["date"].dt.to_period("M")
-    _proxy_monthly = (_df_proxy[_df_proxy["_pwr"].fillna(0) > 50]
-                      .groupby("_month")["_pwr"].max().reset_index())
-    _proxy_monthly.columns = ["_month", "best_pwr"]
+    # FTP proxy: best normalised power of the month × 0.95. Labelled a proxy
+    # everywhere — it is not a measured threshold test.
+    _pwr = pd.to_numeric(df_all["power_np"].fillna(df_all["power_avg"]), errors="coerce")
+    _px = df_all[["date"]].assign(_pwr=_pwr)
+    _px["_month"] = _px["date"].dt.to_period("M")
+    _proxy_monthly = (_px[_px["_pwr"] > 50]
+                      .groupby("_month", as_index=False)["_pwr"].max()
+                      .rename(columns={"_pwr": "best_pwr"}))
     _proxy_monthly["ftp_proxy"] = _proxy_monthly["best_pwr"] * 0.95
-    _proxy_monthly["month_dt"] = _proxy_monthly["_month"].apply(lambda p: p.start_time)
+    _proxy_monthly["month_dt"] = _proxy_monthly["_month"].dt.to_timestamp()
     _proxy_monthly["ftp_trend"] = _proxy_monthly["ftp_proxy"].rolling(3, min_periods=2).mean()
     _proxy_monthly["ftp_gain"] = _proxy_monthly["ftp_proxy"].diff()
 
-    _proxy_monthly = _proxy_monthly.copy()
-    _proxy_monthly["_month_str"] = _proxy_monthly["_month"].astype(str)
-    _outcome_df = _outcome_df.copy()
-    _outcome_df["period_str"] = _outcome_df["period"].astype(str)
+    if not _outcome_df.empty:
+        _outcome_df = _outcome_df.merge(
+            _proxy_monthly[["_month", "ftp_proxy", "ftp_gain"]],
+            on="_month", how="left")
+    else:
+        _outcome_df["ftp_proxy"] = pd.Series(dtype="float64")
+        _outcome_df["ftp_gain"] = pd.Series(dtype="float64")
 
-    _outcome_df = _outcome_df.merge(
-        _proxy_monthly[["_month_str", "ftp_proxy", "ftp_gain"]],
-        left_on="period_str", right_on="_month_str", how="left"
-    ).drop(columns=["_month_str", "period_str"], errors="ignore")
+    n_months = int(_outcome_df["period"].nunique()) if len(_outcome_df) else 0
+    st.caption(f"Full history: {len(_comp_all):,} labelled sessions across "
+               f"{n_months} months ({df_all['date'].min():%b %Y} → "
+               f"{df_all['date'].max():%b %Y}).")
 
     # Chart 1: Monthly composition — only if data exists
     if len(_monthly_type_tss) > 0:
@@ -298,6 +277,7 @@ def render(head, ctx):
                          Median_gain=("ftp_gain", "median"), Avg_TSS=("total_tss", "mean"))
                     .reset_index().sort_values("Avg_gain", ascending=False).round(1))
             _pat.columns = ["Pattern", "Months", "Avg FTP Δ (W)", "Median Δ (W)", "Avg TSS"]
+            _pat["Reliable"] = _pat["Months"].apply(lambda n: "✓" if n >= 5 else "⚠ n<5")
             st.dataframe(_pat, width="stretch", hide_index=True,
                          column_config={
                              "Avg FTP Δ (W)": st.column_config.NumberColumn(format="%.1f"),
