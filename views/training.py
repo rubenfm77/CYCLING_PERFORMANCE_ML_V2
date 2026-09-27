@@ -185,12 +185,16 @@ def render(head, ctx):
         _monthly_type_tss["month_dt"] = _monthly_type_tss["_month"].apply(lambda p: p.start_time)
         # Recompute totals and pct after reindex
         _monthly_totals = _monthly_type_tss.groupby("_month")["type_tss"].sum().rename("month_tss").reset_index()
-        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month", how="left")
+        _monthly_type_tss = _monthly_type_tss.merge(_monthly_totals, on="_month", how="left", suffixes=("", "_drop"))
+        # drop any suffix columns
+        _monthly_type_tss = _monthly_type_tss[[c for c in _monthly_type_tss.columns if not c.endswith("_drop")]]
+        # Safe pct_tss
         if "month_tss" in _monthly_type_tss.columns:
-            _monthly_type_tss["pct_tss"] = (_monthly_type_tss["type_tss"]
-                                            / _monthly_type_tss["month_tss"].replace(0, np.nan) * 100).fillna(0)
+            denom = _monthly_type_tss["month_tss"].replace(0, np.nan)
+            _monthly_type_tss["pct_tss"] = (_monthly_type_tss["type_tss"] / denom * 100).fillna(0)
         else:
             _monthly_type_tss["pct_tss"] = 0.0
+            _monthly_type_tss["month_tss"] = 0.0
 
     _outcome_rows = []
     for period, grp in _comp_all.groupby("_month"):
