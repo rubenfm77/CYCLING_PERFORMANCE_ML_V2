@@ -447,6 +447,27 @@ def render(head, ctx):
                 f"often present twice — once from the head unit and once as a manual "
                 f"upload. Each physical ride is counted once."
             )
+        _lr = int(df_all.attrs.get("labels_recovered", 0) or 0)
+        _lc = int(df_all.attrs.get("labels_carried", 0) or 0)
+        if _lr or _lc:
+            _bits = []
+            if _lc:
+                _bits.append(
+                    f"**{_lc:,}** label(s) from the last 60 days were carried over "
+                    f"from the CSV onto their intervals.icu row, which can never "
+                    f"supply one"
+                )
+            if _lr:
+                _bits.append(
+                    f"**{_lr:,}** label(s) survived a duplicate-pair merge because the "
+                    f"copy that survived was the unlabelled twin"
+                )
+            st.caption(
+                "Without these two steps the most recent two months of training — "
+                "and any categorised session that happened to be double-imported — "
+                "would silently drop out of every type-based view. Recovered: "
+                + "; ".join(_bits) + "."
+            )
         with st.expander("🔍 How the FTP auto-label works — and every session it caught"):
             st.markdown(
                 f"**Rule.** A session with *no* workout name is labelled **FTP** when "

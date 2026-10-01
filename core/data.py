@@ -44,6 +44,12 @@ DUPE_PWR_TOL_W = 3.0
 DUPE_DIST_TOL_M = 1.0
 DIST_COL = "distance_m"
 
+# Every spelling the sources use for "no label": `_match_type` returns an em dash
+# for an API row it could not match, and the Garmin CSV arrives with an empty cell.
+# Defined once so the label-carry step below and the blank test further down can
+# never disagree about what counts as unlabelled.
+BLANK_TYPE_TOKENS = {"—", "-", "", "nan", "None"}
+
 # ── Small helpers (same semantics as app.py) ──────────────────────────────────
 def safe_sum(s) -> float:
     return pd.to_numeric(s, errors="coerce").sum()
@@ -177,6 +183,81 @@ _EXCEL_RENAME = {
 }
 
 
+def _dur_seconds(frame: pd.DataFrame) -> pd.Series | None:
+    """Duration in seconds for either frame, whichever column it carries.
+
+    `duration_s` is the canonical column but it is only built further down, after
+    the CSV/API merge, so it does not exist yet when this is called. `duration_h` is
+    the one both frames have at this point, and `duration_h * 3600` is exactly the
+    value `duration_s` is later set to.
+    """
+    if "duration_s" in frame.columns:
+        return pd.to_numeric(frame["duration_s"], errors="coerce")
+    if "duration_h" in frame.columns:
+        return pd.to_numeric(frame["duration_h"], errors="coerce") * 3600.0
+    if "duration_secs" in frame.columns:
+        return pd.to_numeric(frame["duration_secs"], errors="coerce")
+    return None
+
+
+def _carry_csv_labels(base: pd.DataFrame, recent: pd.DataFrame) -> int:
+    """Move the Excel's `training_type` from the CSV row onto the API row for the
+    same ride, BEFORE the CSV rows are discarded.
+
+    Why this has to exist: the trailing 60 days are rebuilt from intervals.icu, and
+    that API can never report a label — the account holds no workout documents, so
+    `_match_type` returns the blank token for every one of its rows. The merge
+    replaced each CSV row on a shared date with its API twin, so any session the
+    athlete had labelled inside the last two months silently lost its type and
+    vanished from every type-based view. That is the two months that matter most,
+    because it is the present.
+
+    Matching uses the same calendar day and the same 90 s duration window as the
+    duplicate-ride rule below, so two genuinely different rides on one day never
+    swap labels. Row counts are untouched: this only copies a string onto a row that
+    is about to replace the CSV one anyway.
+    """
+    if "training_type" not in base.columns or "training_type" not in recent.columns:
+        return 0
+
+    _b_dur = _dur_seconds(base)
+    _r_dur = _dur_seconds(recent)
+    if _b_dur is None or _r_dur is None:
+        return 0
+    _b_lab = base["training_type"].astype(object)
+    _b_ok = _b_lab.notna() & ~_b_lab.astype(str).str.strip().isin(BLANK_TYPE_TOKENS)
+    if not _b_ok.any():
+        return 0
+
+    _b_day = base["date"].dt.normalize()
+    _r_day = recent["date"].dt.normalize()
+    _out = recent["training_type"].astype(object)
+    carried = 0
+
+    for _day, _grp in base[_b_ok].groupby(_b_day[_b_ok]):
+        _cands = list(recent.index[_r_day == _day])
+        if not _cands:
+            continue
+        for _i, _row in _grp.iterrows():
+            _di = _b_dur.get(_i)
+            for _j in _cands:
+                _dj = _r_dur.get(_j)
+                if pd.isna(_di) or pd.isna(_dj) or abs(_di - _dj) > DUPE_DUR_TOL_S:
+                    continue
+                # Only fill a genuinely unlabelled API row — never overwrite.
+                if str(_out.get(_j)).strip() in BLANK_TYPE_TOKENS:
+                    _out[_j] = _row["training_type"]
+                    carried += 1
+                _cands.remove(_j)
+                break
+
+    if carried:
+        # Assign in place: rebinding a local copy here would silently leave the
+        # caller's frame untouched and every label would still be lost.
+        recent["training_type"] = _out
+    return carried
+
+
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
     base_df = None
@@ -190,14 +271,21 @@ def load_data() -> pd.DataFrame:
     if base_df is not None and len(base_df) > 0 and len(recent) > 0:
         base_df["date"] = pd.to_datetime(base_df["date"], errors="coerce")
         recent["date"] = pd.to_datetime(recent["date"], errors="coerce")
+        # The API cannot carry a label, so hand the CSV's over before the CSV rows
+        # on shared dates are dropped — otherwise every label inside the 60-day
+        # window is thrown away on every reload.
+        _carried_labels = _carry_csv_labels(base_df, recent)
         api_dates = set(recent["date"].dt.date.astype(str))
         base_df = base_df[~base_df["date"].dt.date.astype(str).isin(api_dates)]
         df = pd.concat([base_df, recent], ignore_index=True)
     elif base_df is not None and len(base_df) > 0:
+        _carried_labels = 0
         df = base_df
     elif len(recent) > 0:
+        _carried_labels = 0
         df = recent
     else:
+        _carried_labels = 0
         df = pd.DataFrame()
 
     if df is None or len(df) == 0:
@@ -209,6 +297,7 @@ def load_data() -> pd.DataFrame:
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    df.attrs["labels_carried"] = _carried_labels
 
     for col in ["tss", "power_avg", "hr_avg", "duration_h", "elevation",
                 "if_score", "power_np", "power_max", "cadence"]:
@@ -265,7 +354,7 @@ def load_data() -> pd.DataFrame:
     #
     # Nothing is overwritten silently: `training_type_raw` keeps exactly what the
     # source said and `label_source` records how each row was decided.
-    _BLANK = {"—", "-", "", "nan", "None"}
+    _BLANK = BLANK_TYPE_TOKENS
     _tt = df["training_type"] if "training_type" in df.columns else pd.Series(
         np.nan, index=df.index, dtype="object")
     df["training_type_raw"] = _tt
@@ -342,6 +431,17 @@ def load_data() -> pd.DataFrame:
     _pwr_n = pd.to_numeric(df.get("power_avg"), errors="coerce")
     _dist_n = pd.to_numeric(df.get(DIST_COL), errors="coerce")
     _victims: list = []
+    _label_donations: dict = {}
+    # True where the row carries a label the athlete actually set, judged on the
+    # pre-auto-label value so an inferred FTP never outranks a real one.
+    _raw_lab = (df["training_type_raw"].astype(str).str.strip()
+                if "training_type_raw" in df.columns
+                else pd.Series("", index=df.index, dtype="object"))
+    # `.notna()` is required, not optional: in this pandas `astype(str)` leaves a
+    # missing cell as NaN instead of turning it into the string "nan", so
+    # `.isin({"nan", ...})` alone reports a missing label as a real one — which
+    # silently gave every NaN row priority in the duplicate rule below.
+    _real_label = _raw_lab.notna() & ~_raw_lab.isin(BLANK_TYPE_TOKENS)
     if _dur_n is not None:
         for _day, _grp in df.groupby(df["date"].dt.normalize()):
             if len(_grp) < 2:
@@ -371,13 +471,32 @@ def load_data() -> pd.DataFrame:
                         continue
                     _ni = int(df.loc[_i].notna().sum())
                     _nj = int(df.loc[_j].notna().sum())
-                    _victims.append(_i if _ni <= _nj else _j)
+                    # Which copy survives is decided on completeness alone, exactly
+                    # as before, so no TSS, heart-rate or distance number moves.
+                    _survivor, _victim = (_j, _i) if _ni <= _nj else (_i, _j)
+                    # The one thing completeness must not decide is the LABEL: the
+                    # API can never supply one, so a pair where exactly one copy
+                    # was categorised donates its label to the survivor. Pairs in
+                    # Feb-May 2026 were losing their type this way — the head-unit
+                    # twin carried heart rate, won on notna(), and took the label
+                    # down with it. The reverse direction was just as common, so the
+                    # donation has to work both ways round.
+                    if _real_label[_i] != _real_label[_j]:
+                        _donor = _i if _real_label[_i] else _j
+                        _label_donations[_survivor] = df.at[_donor, "training_type"]
+                    _victims.append(_victim)
                     _dupe_dates.append(str(pd.Timestamp(_day).date()))
                     _seen.update((_i, _j))
                     break
     if _victims:
         _dropped_phys = len(_victims)
         df = df.drop(index=_victims)
+    for _row_i, _label in _label_donations.items():
+        if _row_i in df.index:
+            df.at[_row_i, "training_type"] = _label
+            df.at[_row_i, "training_type_raw"] = _label
+            df.at[_row_i, "label_source"] = "workout"
+    df.attrs["labels_recovered"] = len(_label_donations)
     df = df.reset_index(drop=True)
 
     df.attrs["dupe_rows_dropped"] = _dropped_exact + _dropped_phys
