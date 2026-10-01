@@ -82,6 +82,11 @@ MIN_CELL_N = 3
 # Rep-length classes. `under 90s` is deliberately not subdivided: at that scale
 # the exact seconds are the only honest description, and the user rule says
 # sub-90-second efforts keep their seconds.
+# Half-open on the right: `lo <= secs < hi`. Stated plainly because it is the
+# kind of boundary a reader assumes the other way round: a WHOLE 20:00 (1200 s)
+# lands in "20-30 min", and 19:59 lands in "10-20 min". Nothing is lost by it —
+# every bar and every table row also carries its exact length (fmt_rep), so a
+# 20:00 effort is always visible as "20:00" and never only as a class name.
 REP_CLASSES = [
     ("under 90s", 0, 90),
     ("90s-5min", 90, 300),
@@ -120,6 +125,25 @@ MEASURED_RE = re.compile(
     r"|(?P<sec>\d{1,3})\s*s)"
     r"\s*(?P<w>\d{2,4})\s*w",
     re.IGNORECASE)
+
+# intervals.icu's peak-meter: the highest average power the rider SUSTAINED in
+# that session, reported together with the window it was sustained over.
+#
+# This is the third source, and for long efforts it is the only good one. The
+# auto-detected `interval_summary` reports what is UNUSUAL inside a ride, so on
+# an FTP session it fills up with 10-second spikes and 1-5 minute rolling
+# sections and almost never with the set that was actually ridden. Measured on
+# this file: across 659 detected efforts the most common lengths are 10-14 s and
+# 55-84 s, and exactly ONE detected effort in the whole file sits between 19 and
+# 21 minutes. The peak-meter, by contrast, has a value on all 27 FTP sessions of
+# 2026 and reports its own duration.
+#
+# It is NOT a prescription and NOT a validated test. It is the best sustained
+# effort the head unit saw, which is a real measurement of something real and
+# nothing more than that. Named "peak" throughout so it is never mistaken for a
+# threshold reading.
+BEST_W_COL = "icu_pm_ftp_watts"
+BEST_S_COL = "icu_pm_ftp_secs"
 
 # A description cell is blank in any of these ways. Deliberately the SAME set the
 # loader uses, imported rather than retyped.
@@ -419,6 +443,161 @@ def measured_cells(m: pd.DataFrame, year=None, min_n: int = MIN_CELL_N
                        for t, c, y in zip(out["tt"], out["cls"], out["year"])]
     out["drawable"] = out["n"] >= min_n
     return out.sort_values(["tt", "cls"]).reset_index(drop=True)
+
+
+# ── per day: the bar-and-line chart ──────────────────────────────────────────
+def effort_best(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per session carrying its best SUSTAINED effort.
+
+    Session grain, from the peak-meter fields. This is the source that actually
+    contains the athlete's long intervals: `measured()` is rep grain and reports
+    what the detector found unusual, which on a real interval session is mostly
+    the 10-second accelerations at the start of each rep.
+
+    The duration travels with the wattage and is NOT assumed. A peak of 258 W
+    over 8:00 is a different effort from 188 W over 26:00 and averaging the two
+    would be the exact error this module exists to avoid, so `cls` is derived
+    per row and callers bucket on it.
+    """
+    if df is None or not len(df):
+        return pd.DataFrame(columns=["date", "day", "src", "tt", "secs",
+                                     "cls", "w", "n"])
+    if BEST_W_COL not in df.columns or BEST_S_COL not in df.columns:
+        return pd.DataFrame(columns=["date", "day", "src", "tt", "secs",
+                                     "cls", "w", "n"])
+    label = (df["training_type"].astype(object)
+             if "training_type" in df.columns else None)
+    keep = _has_label(label) if label is not None else pd.Series(
+        True, index=df.index)
+    w = pd.to_numeric(df[BEST_W_COL], errors="coerce")
+    s = pd.to_numeric(df[BEST_S_COL], errors="coerce")
+    ok = keep & w.notna() & s.notna() & (s > 0) & (w > 0)
+    rows = []
+    for i in df.index[ok]:
+        d = df.at[i, "date"] if "date" in df.columns else None
+        # Normalised to the calendar day. Two rides on one date can carry
+        # different clock times, and leaving them in would put two bars on what
+        # the athlete calls one day and make the day-over-day line zigzag for a
+        # reason that has nothing to do with training.
+        day = pd.to_datetime(d).normalize() if d is not None else None
+        rows.append({
+            "date": d,
+            "day": day,
+            # The index of the session in `df`. Carried explicitly because this
+            # frame is rebuilt from a list, so its own index is positional and
+            # would silently pick the wrong session's average watts.
+            "src": i,
+            "tt": str(label.at[i]).strip() if label is not None else "",
+            "secs": int(round(float(s.at[i]))),
+            "cls": rep_class(float(s.at[i])),
+            "w": float(w.at[i]),
+            "n": 1,
+        })
+    out = pd.DataFrame(rows)
+    if len(out):
+        # From `day`, not from the raw date string. `day` was parsed one value
+        # at a time and is already a datetime, so this does not re-parse a
+        # column that may legitimately mix "2026-04-17" and
+        # "2026-05-01 08:30:00" — which pd.to_datetime refuses without an
+        # explicit format.
+        out["year"] = pd.to_datetime(out["day"]).dt.year
+    return out
+
+
+def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
+    """The ONE day-level frame the whole bar chart reads. Session rows collapsed.
+
+    Both `day_series` and `day_options` read this, and that is the point: when
+    they were computed separately the picker's count and the number of bars drawn
+    disagreed, because one counted sessions and the other drew days. A dropdown
+    promising four days and then drawing two bars is exactly the kind of quiet
+    mismatch this project refuses to ship.
+
+    Collapsing rule: a day keeps its BEST sustained effort, never the mean of
+    two. The mean is a third number describing neither ride, and "what did I do
+    on the 14th" is answered by the hardest effort of it. `n_sessions` records
+    when a day held more than one ride rather than hiding it.
+    """
+    cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
+            "avg_w", "dur_s", "year"]
+    b = effort_best(df)
+    if b is None or not len(b):
+        return pd.DataFrame(columns=cols)
+
+    avg = dur = None
+    if with_avg and "power_avg" in getattr(df, "columns", []):
+        avg = pd.to_numeric(df["power_avg"], errors="coerce")
+    if "duration_s" in getattr(df, "columns", []):
+        dur = pd.to_numeric(df["duration_s"], errors="coerce")
+
+    rows = []
+    for (tt, cls, day), grp in b.groupby(["tt", "cls", "day"]):
+        # `src` is each session's own index in `df`, so these are the right rows
+        # and not merely rows at the same positions.
+        idxs = list(grp["src"])
+        top = grp.loc[grp["w"].idxmax()]
+        rows.append({
+            "day": day,
+            "date": top["date"],
+            "src": int(top["src"]),
+            "tt": tt,
+            "cls": cls,
+            "secs": int(top["secs"]),
+            "w": float(top["w"]),
+            "n": 1,
+            "n_sessions": int(len(grp)),
+            "avg_w": (float(avg.loc[idxs].mean())
+                      if avg is not None and idxs else float("nan")),
+            "dur_s": (float(dur.loc[idxs].mean())
+                      if dur is not None and idxs else float("nan")),
+            "year": int(top["year"]),
+        })
+    return pd.DataFrame(rows).sort_values(["tt", "cls", "day"]).reset_index(
+        drop=True)
+
+
+def day_series(df: pd.DataFrame, tt: str, cls: str,
+               with_avg: bool = True) -> pd.DataFrame:
+    """Per-day rows for ONE type and ONE rep-length class, for the bar chart.
+
+    One row per DAY that has an effort of that length, carrying the day's own
+    average watts alongside so the two can be read against each other on the same
+    axis without ever being averaged into one number.
+    """
+    cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
+            "avg_w", "dur_s", "year"]
+    d = _effort_by_day(df, with_avg)
+    if d is None or not len(d):
+        return pd.DataFrame(columns=cols)
+    s = d[(d["tt"] == tt) & (d["cls"] == cls)]
+    if not len(s):
+        return pd.DataFrame(columns=cols)
+    return s.sort_values("day").reset_index(drop=True)
+
+
+def day_options(df: pd.DataFrame) -> pd.DataFrame:
+    """Every (type x rep class) pair that has at least one peak-meter effort.
+
+    Counted in DAYS, because that is what the chart draws. `sessions` is carried
+    alongside for the days that held more than one ride, so the picker can show
+    both and the two can never be confused for each other.
+    """
+    cols = ["tt", "cls", "days", "sessions", "med_w", "med_secs", "first",
+            "last", "years"]
+    d = _effort_by_day(df)
+    if d is None or not len(d):
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(["tt", "cls"]).agg(
+        days=("day", "size"),
+        sessions=("n_sessions", "sum"),
+        med_w=("w", "median"),
+        med_secs=("secs", "median"),
+        first=("day", "min"),
+        last=("day", "max"),
+        years=("year", "nunique"),
+    ).reset_index()
+    return g.sort_values(["years", "days"], ascending=False).reset_index(
+        drop=True)
 
 
 # ── honesty surfaces ─────────────────────────────────────────────────────────

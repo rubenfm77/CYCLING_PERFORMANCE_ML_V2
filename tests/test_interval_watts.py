@@ -17,6 +17,7 @@ import sys
 import warnings
 
 warnings.filterwarnings("ignore")
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,9 +25,10 @@ sys.path.insert(0, ROOT)
 
 from core.theme import BLANK_TYPE_TOKENS  # noqa: E402
 from ml.interval_watts import (  # noqa: E402
-    MIN_CELL_N, REP_ORDER, audit, coverage_note, fmt_rep, fmt_watts, main_set,
-    measured, measured_cells, parse_measured, parse_prescribed, prescribed,
-    prescribed_cells, prescribed_evolution, prescribed_yoy, rep_class,
+    BEST_S_COL, BEST_W_COL, MIN_CELL_N, REP_ORDER, audit, coverage_note,
+    day_options, day_series, effort_best, fmt_rep, fmt_watts, main_set, measured,
+    measured_cells, parse_measured, parse_prescribed, prescribed, prescribed_cells,
+    prescribed_evolution, prescribed_yoy, rep_class,
 )
 
 FAILS = []
@@ -306,7 +308,96 @@ check("prescribed and measured are counted separately",
 
 print()
 print("=" * 72)
-print("7. degenerate input must not raise")
+print("7. the per-day series: bars of interval watts by day")
+print("=" * 72)
+# Seven sessions over five days. Two of them share a day, two more share a day
+# with DIFFERENT clock times, one is unlabelled, and the lengths land on both
+# sides of every class boundary that matters.
+DAY_DF = pd.DataFrame({
+    "date": ["2026-04-17", "2026-04-17",
+             "2026-05-01 08:30:00", "2026-05-01 18:00:00",
+             "2026-06-02", "2026-06-03", "2026-06-04"],
+    "training_type": ["FTP", "FTP", "FTP", "FTP", "END", "END", ""],
+    "power_avg": [160, 155, 150, 165, 130, 140, 100],
+    "duration_s": [7200, 7200, 5400, 3600, 3600, 3600, 3600],
+    "interval_summary": [""] * 7,
+    "WorkoutDescription": [""] * 7,
+    BEST_W_COL: [214, 240, 231, 200, 190, 205, 300],
+    BEST_S_COL: [1200, 1200, 1200, 1200, 1800, 600, 900],
+})
+
+B = effort_best(DAY_DF)
+check("one row per SESSION, not per day and not per rep",
+      len(B) == 6, f"{len(B)} rows")
+check("an unlabelled session is excluded, never charted",
+      "" not in set(B["tt"]) and 6 not in set(B["src"]),
+      f"types={sorted(set(B['tt']))} src={sorted(set(B['src']))}")
+check("the source index is carried through, not left positional",
+      sorted(B["src"]) == [0, 1, 2, 3, 4, 5],
+      f"{sorted(B['src'])} — without `src` the session average is read from "
+      f"the wrong rows entirely")
+check("every row's class comes from its OWN duration",
+      all(rep_class(r.secs) == r.cls for r in B.itertuples()))
+
+S = day_series(DAY_DF, "FTP", "20-30 min")
+check("one row per DAY even when two sessions share it",
+      len(S) == 2, f"{len(S)} rows")
+check("a day with two sessions keeps the harder effort, not their mean",
+      sorted(S["w"]) == [231, 240], f"{sorted(S['w'])}")
+check("n_sessions says when a day held more than one ride",
+      sorted(S["n_sessions"]) == [2, 2], f"{list(S['n_sessions'])}")
+check("the session average is the mean of that day's sessions",
+      sorted(S["avg_w"]) == [157.5, 157.5],
+      f"{sorted(S['avg_w'])} — 160+155 and 150+165 both give 157.5")
+check("a day is normalised, so a clock time cannot split one day in two",
+      all(pd.Timestamp(d).time() == pd.Timestamp("00:00").time()
+          for d in S["day"]))
+check("days come back in order",
+      bool(pd.to_datetime(S["day"]).is_monotonic_increasing))
+check("no bar is ever above the average of the session holding it",
+      bool((S["avg_w"] < S["w"]).all()))
+check("the interval watts are never replaced by the session average",
+      not S["w"].equals(S["avg_w"]))
+
+O = day_options(DAY_DF)
+got = set(map(tuple, O[["tt", "cls"]].values.tolist()))
+# 1800 s is a whole 30:00 and therefore "30+ min"; 600 s is a whole 10:00 and
+# therefore "10-20 min". Both are the half-open boundary behaving as documented.
+check("day_options offers only pairs that exist",
+      got == {("FTP", "20-30 min"), ("END", "30+ min"), ("END", "10-20 min")},
+      f"{sorted(got)}")
+fr = O[(O["tt"] == "FTP") & (O["cls"] == "20-30 min")].iloc[0]
+check("day_options counts DAYS, so the picker cannot promise more bars than "
+      "the chart draws",
+      int(fr["days"]) == 2, f"{int(fr['days'])} days")
+check("day_options also carries the sessions behind those days",
+      int(fr["sessions"]) == 4, f"{int(fr['sessions'])} sessions")
+check("the picker's day count equals the number of bars drawn",
+      int(fr["days"]) == len(S), f"picker {int(fr['days'])} vs {len(S)} bars")
+check("the picker's median is the median of the bars drawn, not of the "
+      "sessions behind them",
+      abs(float(fr["med_w"]) - float(S["w"].median())) < 1e-9,
+      f"{float(fr['med_w'])} vs {float(S['w'].median())}")
+check("day_options reports the median length it measured",
+      fmt_rep(int(O[(O["tt"] == "END") & (O["cls"] == "30+ min")]
+                  ["med_secs"].iloc[0])) == "30:00")
+
+print()
+print("=" * 72)
+print("8. the boundary, stated rather than assumed")
+print("=" * 72)
+check("a WHOLE 20:00 sits in the class that names 20",
+      rep_class(1200) == "20-30 min", rep_class(1200))
+check("19:59 is not in it",
+      rep_class(1199) == "10-20 min", rep_class(1199))
+check("the exact length is always printable, so a 20:00 never shows as a "
+      "class name alone",
+      fmt_rep(1200) == "20:00" and fmt_rep(1199) == "19:59",
+      f"{fmt_rep(1200)} / {fmt_rep(1199)}")
+
+print()
+print("=" * 72)
+print("9. degenerate input must not raise")
 print("=" * 72)
 for name, fn in (
     ("prescribed on empty", lambda: prescribed(pd.DataFrame())),
@@ -317,6 +408,18 @@ for name, fn in (
     ("measured_cells on empty", lambda: measured_cells(pd.DataFrame(), 2026)),
     ("audit on empty", lambda: audit(pd.DataFrame())),
     ("cells for an absent type", lambda: prescribed_cells(P, "NOPE")),
+    ("effort_best on empty", lambda: effort_best(pd.DataFrame())),
+    ("effort_best without the peak columns",
+     lambda: effort_best(pd.DataFrame({"date": ["2026-01-01"],
+                                       "training_type": ["FTP"]}))),
+    ("day_series on empty", lambda: day_series(pd.DataFrame(), "FTP", "20-30 min")),
+    ("day_series for an absent type",
+     lambda: day_series(DAY_DF, "NOPE", "20-30 min")),
+    ("day_options on empty", lambda: day_options(pd.DataFrame())),
+    ("day_series with every length missing",
+     lambda: day_series(DAY_DF.assign(**{BEST_W_COL: [np.nan] * 7,
+                                         BEST_S_COL: [np.nan] * 7}),
+                        "FTP", "20-30 min")),
 ):
     try:
         fn()

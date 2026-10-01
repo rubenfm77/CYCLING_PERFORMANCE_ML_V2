@@ -858,3 +858,129 @@ asked for".
 - The 15 custom label values still appear in no type-based chart.
 - The 48 empty-shell sessions still need a decision on blanking their distance.
 - The Intervals page is still the one the user calls unusable.
+
+## 16. Intervals on the Evolution page, and the peak-meter that actually holds them
+
+The instruction was: *"in evolution i dont give a fuck about average watts, i want
+to isolate the intervals just like in training, have charts with watts and then a
+line to compare between days. x axis date, y in bars intervals, and a line to
+compare average watts between intervals and days. simple."*
+
+The mistake in the previous round was building a separate ninth page. Intervals
+belong where the athlete looks for evolution, so the Evolution page now opens on
+them: **`_interval_by_day(ctx)` is the first tab**, and the year-over-year body
+moved wholesale into a second tab. It was re-indented by script rather than by
+hand, and `git diff -w` confirms the move is whitespace-only - 196 insertions and
+4 deletions against 726 lines of raw churn.
+
+### 16a. Why the 20-minute intervals "were not there": the wrong source
+
+Three separate causes, all confirmed against real data before anything was
+edited.
+
+1. **The auto-detector is the wrong instrument.** `interval_summary` reports
+   what is UNUSUAL inside a ride, not what was prescribed. Across 659 detected
+   efforts the common lengths are 10-14 s and 55-84 s - the accelerations at the
+   start of each rep and the rolling sections the head unit segments out. Exactly
+   **one** detected effort in the whole file sits between 19 and 21 minutes, and
+   it is 213 W.
+2. **The real 20-minute record lives in the peak-meter fields**,
+   `icu_pm_ftp_watts` with `icu_pm_ftp_secs` - a third source, session grain,
+   that reports the highest sustained average AND the window it was sustained
+   over. It has a reading on **all 27 FTP sessions of 2026**, and 144 sessions
+   overall (2025: 3, 2026: 141). My earlier column probe filtered on
+   `20|peak|best|micro|interval` and missed it, because the name contains none of
+   those tokens. `core/data.py:373` already used it, and `year_over_year.py:175`
+   already collected it.
+3. **The boundary is half-open, so 20:00 lands in `"20-30 min"`.** That is
+   defensible and is now documented at `REP_CLASSES` rather than left to be
+   rediscovered, because it is exactly the boundary a reader assumes the other
+   way round. Every bar and every table row also carries its exact length, so a
+   20:00 effort is visible as `20:00` and never only as a class name.
+
+**FTP 20-30 min, nine days: 214, 218, 226, 240, 188, 242, 231, 241, 244 W, of
+which four are a whole 20:00** (2026-04-17, 07-23, 09-15, 09-22). FTP 10-20 min
+adds ten more days at 223-248 W.
+
+### 16b. The peak-meter is a real peak - measured, not assumed
+
+Before writing "the highest sustained average" into a caption, it was tested
+against the session's own average watts on all 144 rows:
+
+| field | n | >= session avg | median gap |
+|---|---|---|---|
+| `icu_pm_ftp_watts` | 144 | **144** | +54 W |
+| `icu_rolling_p_max` | 144 | 144 | +500 W |
+| `ss_p_max` | 144 | **0** | -153 W |
+
+`ss_p_max` is below the session average on every single row, so it is not a peak
+of the session and was not used. `icu_pm_ftp_watts` is above it on every row, and
+its ratio to the session average is ~1.34-1.40 across every session-length band,
+i.e. it does not drift with ride length - which is what a peak should do.
+
+### 16c. Three real bugs, and three of my own checks being wrong
+
+Per the standing rule: when a check fails, first decide whether the check or the
+code is wrong. It was my checks, three times.
+
+- **Wrong check, twice.** I asserted `avg <= bar` and wrote it as
+  `bar <= avg`. Separately I asserted a `20:00` bar while the harness had
+  selected AEROBIC BASE by default - a real finding about the harness, not the
+  chart. And `rep_class(1800)` is `"30+ min"`, not `"20-30 min"`; 1800 s is a
+  whole 30:00.
+- **Real bug: positional index leaking.** `effort_best()` rebuilds its frame
+  from a list, so its index is positional. `avg.loc[idxs]` was therefore reading
+  *whatever rows happened to sit at those positions* - the average watts beside
+  each bar belonged to unrelated sessions. Fixed by carrying an explicit `src`
+  column holding each session's own index in `df`, and pinned by a test.
+- **Real bug: the picker could promise bars it would not draw.** `day_options`
+  counted SESSIONS while `day_series` drew DAYS, so on a day with two rides the
+  dropdown said "4 day(s)" and the chart drew 2 bars. Fixed by collapsing both
+  onto one private `_effort_by_day()` frame; `days` and `sessions` are now both
+  reported, and a test asserts the picker count equals the bar count and the
+  picker median equals the median of the bars shown.
+- **Real fragility, caught only by the synthetic fixture.**
+  `out["year"] = pd.to_datetime(out["date"]).dt.year` raises on a column that
+  legitimately mixes `"2026-04-17"` and `"2026-05-01 08:30:00"`. It is derived
+  from the already-parsed normalised `day` now. This only failed on synthetic
+  data - on the real file `date` is already a datetime - which is the argument
+  for keeping credential-free tests.
+
+A day holding two sessions keeps its **harder** effort, never the mean: the mean
+describes neither ride, `n_sessions` records that it happened, and the session
+average shown beside it is the mean of the day's sessions. Sessions are also
+normalised to the calendar day, because two rides at 08:30 and 18:00 are one day
+to the athlete and two bars otherwise.
+
+### 16d. Files
+
+- `ml/interval_watts.py` - `effort_best`, `_effort_by_day`, `day_series`,
+  `day_options`; `BEST_W_COL` / `BEST_S_COL`; `REP_CLASSES` boundary documented.
+- `views/evolution.py` - `_interval_by_day(ctx)` and the two-tab restructure.
+- `tests/test_interval_watts.py` - sections 7, 8 and 9: the per-day rules on a
+  7-session synthetic frame, the boundary, and eight degenerate inputs.
+
+Verification was `tests/test_interval_watts.py` (all pass, no credentials) and
+`verify_evolution.py`, which stubs streamlit, forces four picker selections
+including FTP / 20-30 min, and asserts on the real figures: bars present, exact
+length labelled, line points equal bar count, no bar above its own session
+average, date axis, thousands separators, table row per bar. The stub needs
+`st.session_state` to be a real mapping - `core/context.py` calls `.get()` on it
+before any page code runs.
+
+### 16e. Still open
+
+- **Training page categories** still do not match the agreed 11 types.
+  `views/training.py:331-400` invents its own `pattern`/`combo` taxonomy
+  ("Single-dominant", "Mixed", "Top-3 types by TSS share") derived from TSS
+  rather than from `MAIN_TYPES`. Not touched yet.
+- **Ronnestad -> BILLAT.** Still needs the explicit decision, and the two
+  requests pull against each other: relabelling the 23 shape-matched sessions
+  would move ~10 FTP and ~9 AEROBIC BASE sessions out of the very FTP view this
+  chart now serves. The non-destructive option - keep the athlete's label and
+  add ronnestad as a derived flag - is still on the table.
+- **Heat analysis** and the **weekly planner with rest weeks**: untouched.
+- The separate `views/interval_watts.py` ninth page still exists alongside the
+  new Evolution tab. Overlap should be resolved on the athlete's word.
+- eFTP retargeting: 241 W in the 10-20 min class is still a median of detected
+  efforts, not a validated threshold test. Do not call it eFTP.
