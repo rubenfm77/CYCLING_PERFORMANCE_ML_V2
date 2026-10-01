@@ -8,6 +8,7 @@ import streamlit as st
 
 from core.components import (callout, legend, metric_card, page_header, section, show,
                              stat_block)
+from core.data import FTP_AUTO_FRAC, FTP_AUTO_MAX_S, FTP_AUTO_MIN_S
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, FTP_DRIVERS, H_CARD, H_PAIR, H_STD,
                         IF_THRESHOLD, IF_VO2, IF_Z2_MAX, MAIN_TYPES, SURGERY, TYPE_COLORS,
                         ZONES, style_figure)
@@ -217,7 +218,7 @@ def render(head, ctx):
     # Both of these fields exist only from 2025 onward. There is no honest
     # pre-2025 threshold number in this dataset — the series starts late on
     # purpose rather than being back-filled with a proxy.
-    PM_LO, PM_HI = 18 * 60, 25 * 60
+    PM_LO, PM_HI = FTP_AUTO_MIN_S, FTP_AUTO_MAX_S
     _pm_w = _num(df_all, "icu_pm_ftp_watts")
     _pm_s = _num(df_all, "icu_pm_ftp_secs")
     _eftp = _num(df_all, "eftp")
@@ -424,6 +425,62 @@ def render(head, ctx):
                      H_STD, showlegend=False)
         show(fig_tif)
         st.caption("Orange | 0.75 — SST boundary · red | 0.85 — FTP threshold")
+
+    # ── Labelling audit: show exactly how each type was decided ─────────────
+    if "label_source" in df_all.columns:
+        _src = df_all["label_source"].value_counts()
+        _n_auto = int(_src.get("auto-ftp", 0))
+        _n_lab = int(_src.get("workout", 0))
+        _n_unl = int(_src.get("unlabelled", 0))
+        st.caption(
+            f"Types come from two places: **{_n_lab:,}** sessions carry a workout name "
+            f"from intervals.icu, and **{_n_auto:,}** were labelled FTP by the rule "
+            f"below. **{_n_unl:,}** sessions are still unlabelled and appear in no "
+            f"type-based view — that is a real gap in the data, not a rounding "
+            f"error."
+        )
+        _de = int(df_all.attrs.get("dupe_rows_dropped", 0) or 0)
+        if _de:
+            st.caption(
+                f"Sessions counted: **{len(df_all):,}**. That is "
+                f"**{_de:,} fewer** than the raw import, because the same ride was "
+                f"often present twice — once from the head unit and once as a manual "
+                f"upload. Each physical ride is counted once."
+            )
+        with st.expander("🔍 How the FTP auto-label works — and every session it caught"):
+            st.markdown(
+                f"**Rule.** A session with *no* workout name is labelled **FTP** when "
+                f"it contains a peak-meter effort of "
+                f"**{FTP_AUTO_MIN_S // 60}–{FTP_AUTO_MAX_S // 60} min** at "
+                f"**≥ {FTP_AUTO_FRAC:.0%} of that session's own eFTP**.\n\n"
+                f"Each session is compared against the eFTP recorded *on that ride*, "
+                f"not today's — eFTP is a rolling value, so using the current one on "
+                f"an old session would be anachronistic.\n\n"
+                f"The window is the same one the measured-threshold chart above uses, "
+                f"so the label a session gets and the number that chart plots always "
+                f"come from the same definition. Nothing is overwritten silently: the "
+                f"original value is kept in `training_type_raw`."
+            )
+            if _n_auto:
+                _a = df_all[df_all["label_source"] == "auto-ftp"].copy()
+                _a["effort"] = (_a["auto_ftp_effort_s"] / 60).round(1)
+                _a["min"] = _a["effort"].map(lambda m: f"{m:.0f} min")
+                _a["effort"] = _a["auto_ftp_effort_w"].round(0)
+                _a["pct"] = (_a["auto_ftp_effort_w"] / _a["auto_ftp_threshold_w"]).round(3)
+                _a = _a[["date", "effort", "min", "pct"]].sort_values("date", ascending=False)
+                _a["date"] = _a["date"].dt.strftime("%Y-%m-%d")
+                _a["pct"] = _a["pct"].map(lambda p: f"{p:.1%}")
+                _a.columns = ["Date", "Effort (W)", "Window", "% of eFTP"]
+                st.dataframe(_a, width="stretch", hide_index=True,
+                             column_config={
+                                 "Effort (W)": st.column_config.NumberColumn(format="%.0f"),
+                                 "% of eFTP": st.column_config.TextColumn(),
+                             })
+                st.caption(f"{_n_auto} session(s) matched. A % of eFTP near 100 % is "
+                           f"threshold work; far above it means a hard outlier effort.")
+            else:
+                callout("No sessions matched", "The rule caught nothing in this dataset.",
+                        C["muted"], icon="ℹ️")
 
     # ── Power zones ────────────────────────────────────────────────────────
     section("🎯 Power zones (FTP-relative)")

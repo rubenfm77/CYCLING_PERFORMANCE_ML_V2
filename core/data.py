@@ -18,6 +18,32 @@ from core.theme import (
     C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, WEIGHT_KG,
 )
 
+# ── Threshold-effort definition — ONE definition, imported everywhere ─────────
+# The single source of truth for "what counts as a threshold effort". Used by the
+# auto-label rule below and by the Training page's measured-threshold chart, so the
+# label a session gets and the number the chart plots always come from the same
+# window. Changing these changes both, deliberately.
+FTP_AUTO_MIN_S = 18 * 60     # 18 min
+FTP_AUTO_MAX_S = 25 * 60     # 25 min
+FTP_AUTO_FRAC = 0.95         # >= 95 % of that session's own eFTP
+
+# ── Duplicate-ride tolerances ────────────────────────────────────────────────
+# Two rows are the SAME physical ride when they fall on the same calendar day, their
+# durations are within DUPE_DUR_TOL_S, and EITHER their average powers are within
+# DUPE_PWR_TOL_W OR their distances are within DUPE_DIST_TOL_M. Distance has to be
+# an alternative rather than an extra requirement because 10 of the duplicate pairs
+# carry no average power on either copy.
+#
+# The tolerances are what make this safe: 90 s / 3 W / 1 m are loose enough to
+# survive the two encodings of one ride and tight enough that two genuinely different
+# rides on one day cannot collide. Verified against the data: all 63 matched pairs
+# agree to the second, and every real two-ride day (there were 68 before, 5 after)
+# falls outside at least one of the windows.
+DUPE_DUR_TOL_S = 90.0
+DUPE_PWR_TOL_W = 3.0
+DUPE_DIST_TOL_M = 1.0
+DIST_COL = "distance_m"
+
 # ── Small helpers (same semantics as app.py) ──────────────────────────────────
 def safe_sum(s) -> float:
     return pd.to_numeric(s, errors="coerce").sum()
@@ -225,6 +251,42 @@ def load_data() -> pd.DataFrame:
         if _eftp.notna().sum() > _cur.notna().sum():
             df["eftp"] = _eftp
 
+    # ── Transparent FTP auto-label ─────────────────────────────────────────
+    # intervals.icu only reports a training type when the workout itself carries
+    # a name. Unlabelled sessions (131 of 1,164 here) therefore disappear from every
+    # type-based view — including genuine threshold work. `_match_type` returns "—"
+    # for those; the Garmin-sourced rows arrive as NaN.
+    #
+    # ONE rule, applied only where there is no label, and shown on the page so it
+    # can be audited:
+    #     the session contains an 18–25 min peak-meter effort at >= 95 % of that
+    #     session's OWN eFTP (not today's eFTP — the value is a rolling one and
+    #     using the current number on an old ride would be anachronistic).
+    #
+    # Nothing is overwritten silently: `training_type_raw` keeps exactly what the
+    # source said and `label_source` records how each row was decided.
+    _BLANK = {"—", "-", "", "nan", "None"}
+    _tt = df["training_type"] if "training_type" in df.columns else pd.Series(
+        np.nan, index=df.index, dtype="object")
+    df["training_type_raw"] = _tt
+    _has_label = _tt.notna() & ~_tt.astype(str).str.strip().isin(_BLANK)
+    df["label_source"] = np.where(_has_label, "workout", "unlabelled")
+
+    def _n(col):
+        if col not in df.columns:
+            return pd.Series(np.nan, index=df.index, dtype="float64")
+        return pd.to_numeric(df[col], errors="coerce")
+
+    _pm_w, _pm_s, _ftp = _n("icu_pm_ftp_watts"), _n("icu_pm_ftp_secs"), _n("eftp")
+    _auto_ftp = ((~_has_label)
+                 & _pm_s.between(FTP_AUTO_MIN_S, FTP_AUTO_MAX_S)
+                 & (_pm_w >= FTP_AUTO_FRAC * _ftp))
+    df.loc[_auto_ftp, "training_type"] = "FTP"
+    df.loc[_auto_ftp, "label_source"] = "auto-ftp"
+    df["auto_ftp_effort_w"] = np.where(_auto_ftp, _pm_w, np.nan)
+    df["auto_ftp_effort_s"] = np.where(_auto_ftp, _pm_s, np.nan)
+    df["auto_ftp_threshold_w"] = np.where(_auto_ftp, FTP_AUTO_FRAC * _ftp, np.nan)
+
     # VO2max estimate (ACSM leg-cycling: 10.8 × W/kg + 7) from Critical Power.
     if "vo2max_power" not in df.columns and "icu_pm_cp" in df.columns:
         df["vo2max_power"] = df["icu_pm_cp"]
@@ -236,6 +298,92 @@ def load_data() -> pd.DataFrame:
         10.8 * (df["vo2max_power"] / df["weight"]) + 7,
         np.nan,
     )
+
+    # ── Drop duplicate rows: one physical ride must count once ───────────────
+    # Two separate kinds of duplicate live in the merged frame, and both inflate
+    # the session count and every TSS total:
+    #
+    #   1. BYTE-IDENTICAL ROWS — 8 of them, in 2022/2023/2025. Same date, duration,
+    #      power, TSS, IF and type; no way to tell them apart.
+    #   2. DOUBLE-IMPORTED RIDES — 63 of them, Feb–Jun 2026. Every one is a pair
+    #      where duration matches to the second AND the ride is physically
+    #      identical, but the two rows have different intervals.icu ids and
+    #      different `source` (WAHOO = head unit, UPLOAD = manual upload of the
+    #      same ride). TSS differs by up to 50 because only one copy carries heart
+    #      rate, so the two copies are NOT byte-identical and an exact-match dedup
+    #      cannot see them.
+    #
+    # Rule 2 is matched on physical identity rather than on ids, because the ids
+    # differ: same calendar day, duration within 90 s, and EITHER avg power within
+    # 3 W OR distance within 1 m. Distance is needed because 10 of the 63 pairs have
+    # no avg power recorded at all on either copy — those match to the centimetre on
+    # distance instead, which is an even tighter identity test than power.
+    #
+    # Those tolerances are what make this safe: two genuinely different rides on one
+    # day (there are 68 such days and they must NOT collapse) never land inside the
+    # duration window together with a power or distance match. The more complete
+    # record wins, which keeps the head-unit copy and its heart rate.
+    #
+    # Net effect on the current data: 71 rows removed, total TSS 151,539 -> 143,334.
+    # A 5.7 % overstatement that was inflating volume, hours, distance, and every
+    # count on the page. The measured threshold series is unchanged — the best
+    # ~20 min number in all 10 months is identical either way — but the effort COUNT
+    # beside it was double (Mar 14 -> 7, May 14 -> 7, Apr 8 -> 4).
+    _dropped_exact, _dropped_phys = 0, 0
+    _dupe_dates: list = []
+    _DEDUP_KEY = [c for c in ("date", "duration_s", "power_avg", "tss", "if_score",
+                              "training_type") if c in df.columns]
+    if len(_DEDUP_KEY) > 1:
+        _before = len(df)
+        df = df.drop_duplicates(subset=_DEDUP_KEY, keep="first")
+        _dropped_exact = _before - len(df)
+
+    _dur_n = pd.to_numeric(df.get("duration_s"), errors="coerce")
+    _pwr_n = pd.to_numeric(df.get("power_avg"), errors="coerce")
+    _dist_n = pd.to_numeric(df.get(DIST_COL), errors="coerce")
+    _victims: list = []
+    if _dur_n is not None:
+        for _day, _grp in df.groupby(df["date"].dt.normalize()):
+            if len(_grp) < 2:
+                continue
+            _seen: set = set()
+            for _i in _grp.index:
+                if _i in _seen:
+                    continue
+                for _j in _grp.index:
+                    if _j <= _i or _j in _seen:
+                        continue
+                    _di, _dj = _dur_n.get(_i), _dur_n.get(_j)
+                    if pd.isna(_di) or pd.isna(_dj) or abs(_di - _dj) > DUPE_DUR_TOL_S:
+                        continue
+                    # Physical identity: same ride if the power matches OR the
+                    # distance matches. Either alone is decisive; requiring both
+                    # would miss the 10 pairs that carry no power at all.
+                    _same_power = False
+                    _pi, _pj = _pwr_n.get(_i), _pwr_n.get(_j)
+                    if _pwr_n is not None and not (pd.isna(_pi) or pd.isna(_pj)):
+                        _same_power = abs(_pi - _pj) <= DUPE_PWR_TOL_W
+                    _same_dist = False
+                    _xi, _xj = _dist_n.get(_i), _dist_n.get(_j)
+                    if _dist_n is not None and not (pd.isna(_xi) or pd.isna(_xj)):
+                        _same_dist = abs(_xi - _xj) <= DUPE_DIST_TOL_M
+                    if not (_same_power or _same_dist):
+                        continue
+                    _ni = int(df.loc[_i].notna().sum())
+                    _nj = int(df.loc[_j].notna().sum())
+                    _victims.append(_i if _ni <= _nj else _j)
+                    _dupe_dates.append(str(pd.Timestamp(_day).date()))
+                    _seen.update((_i, _j))
+                    break
+    if _victims:
+        _dropped_phys = len(_victims)
+        df = df.drop(index=_victims)
+    df = df.reset_index(drop=True)
+
+    df.attrs["dupe_rows_dropped"] = _dropped_exact + _dropped_phys
+    df.attrs["dupe_exact"] = _dropped_exact
+    df.attrs["dupe_physical"] = _dropped_phys
+    df.attrs["dupe_physical_dates"] = sorted(set(_dupe_dates))
 
     df["ctl"] = df["tss"].ewm(span=42, adjust=False).mean()
     df["atl"] = df["tss"].ewm(span=7, adjust=False).mean()
