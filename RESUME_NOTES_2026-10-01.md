@@ -294,3 +294,81 @@ above, so it is *not* done. It is a decision for the user, not a guess to make.
 never executed** — the new disclosure rendered nothing under test and the failure surfaced
 only when the stub was fixed. Any new UI code inside a `with` block is untested until the
 stub handles it.
+
+---
+
+## 11. Addendum - the loader was throwing labels away (commit `652ede0`)
+
+The athlete labelled 57 sessions from the Oct 2025 - Sep 2026 gap (AEROBIC BASE 36,
+FTP 13, BILLAT 4, VO2MAX 3, PIRAMIDAL 1). All 57 were written to the CSV correctly and
+**47 of them were then deleted by `load_data()` before any view could see them.** Two
+independent bugs, both in `core/data.py`:
+
+### 11a. The 60-day API overlay dropped every label inside the window
+
+```python
+api_dates = set(recent["date"].dt.date.astype(str))
+base_df = base_df[~base_df["date"].dt.date.astype(str).isin(api_dates)]
+df = pd.concat([base_df, recent], ignore_index=True)
+```
+
+Whole-**date** replacement, not row-level. The API row cannot carry a label - the account
+has zero workout documents, so `_match_type` returns the blank token for all 37 rows.
+So every session categorised inside the trailing 60 days lost its type on every reload.
+That is the most recent two months: the present, not the history.
+
+Fix: `_carry_csv_labels(base, recent)` copies the CSV's label onto the API row *before*
+the CSV rows are dropped, matched on the same calendar day and the same 90 s duration
+window as the duplicate rule (`_dur_seconds()` supplies the duration because `duration_s`
+does not exist yet at that point - it is built later, after the merge). Count is exposed
+as `df.attrs["labels_carried"]` = 32.
+
+### 11b. The duplicate rule traded a label away for a heart rate
+
+Survivor selection was `notna().count()` only. For the WAHOO-head-unit / manual-UPLOAD
+pairs the head-unit copy has heart rate, so it won - and took the categorised twin's label
+down with it. Worked in **both** directions depending on which copy was labelled.
+
+Fix: survivor selection is unchanged (so no TSS, HR or distance number moves), but when
+exactly one copy of a pair is categorised, that label is *donated* to the survivor.
+`df.attrs["labels_recovered"]` = 15.
+
+### 11c. `astype(str)` no longer stringifies NaN in this pandas - `.notna()` is load-bearing
+
+```python
+pd.Series(["END", float("nan")], dtype=object).astype(str)   ->  ['END', nan]   # NOT 'nan'
+```
+
+So `.isin({"nan", "", "-", "—"})` alone reports a **missing** label as a **real** one.
+That silently gave every NaN row priority in the duplicate rule and made the 11b fix look
+like it made things worse. The pre-existing `_has_label` was safe because it is guarded by
+`_tt.notna()`; the new code needs the same guard. Grepped the repo: every other
+`astype(str)` either `fillna("")` first or formats dates/ids, so nothing else is affected.
+
+### 11d. Editing a committed CSV without churning it
+
+A normal `read_csv` / `to_csv` round-trip rewrote ~400 unrelated cells at the 16th
+significant digit and appended `.0` to integer ids (`strava_id`, `power_meter_serial`).
+`dtype=str, keep_default_na=False` round-trips byte-identically and leaves a diff of
+exactly the 57 edited cells. Use that whenever only a few cells of a committed data file
+change. Verified with a per-column raw-text diff: only `training_type` moved, 57 cells,
+all previously blank, **0 pre-existing labels overwritten**.
+
+### 11e. Result
+
+| | before | after |
+|---|---|---|
+| rows | 1,093 | 1,093 |
+| TSS | 143,334 | 143,334 |
+| labelled sessions | 992 | 1,039 |
+| unlabelled | 86 | 54 |
+| your 57 labels visible in-app | 10 | **57** |
+
+8/8 tests pass; real `render()` draws 8 figures. Measured threshold series unchanged
+(Dec 2025 202 W -> Sep 2026 244 W) - labels do not touch it.
+
+BILLAT now has a 2026 row for the first time, which is what the year-over-year comparison
+needs. Note the athlete's definition: BILLAT = "ronnestad", reclassified so it can be
+compared with previous years - a long steady ride **ending with a short hard interval**.
+All 4 new BILLAT sessions have a peak-meter best window of exactly 7.5 min at 112-116 % of
+eFTP, which matches that shape precisely.
