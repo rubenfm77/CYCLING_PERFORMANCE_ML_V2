@@ -372,3 +372,107 @@ needs. Note the athlete's definition: BILLAT = "ronnestad", reclassified so it c
 compared with previous years - a long steady ride **ending with a short hard interval**.
 All 4 new BILLAT sessions have a peak-meter best window of exactly 7.5 min at 112-116 % of
 eFTP, which matches that shape precisely.
+
+---
+
+## 12. Addendum - the Evolution page (commit `f075fb5`)
+
+`views/evolution.py` + `ml/year_over_year.py` + `tests/test_year_over_year.py`.
+Registered as the 8th page in `app_modern.py`. Session grain (whole rides), which is
+the grain the athlete's own labelling exists at - distinct from `ml/type_comparison.py`,
+which is per-REP grain. Do not mix the two.
+
+### 12a. The measurement that decided the design
+
+Before writing any UI, count the cells. n >= 3 per (type x duration class x year):
+
+| type | drawable cells | years |
+|---|---|---|
+| AEROBIC BASE | 22 | 8 |
+| FTP | 15 | 7 |
+| END | 17 | 6 |
+| VO2MAX | 9 | 6 |
+| FATMAX | 7 | 6 |
+| SST | 7 | 5 |
+| TORQUE | 7 | 4 |
+| BILLAT | 5 | 4 (2021 2022 2025 2026) |
+| TEMPO | 5 | 3 |
+| PIRAMIDAL | 3 | 3 |
+| Q-I INTERVALS | 2 | 1 - too thin, says so |
+
+### 12b. Year-over-year WATTS does not exist. Half the original ask.
+
+Threshold watts are **measured**, and the measurement starts **Dec 2025**. 138 readings
+total: 3 in 2025 (all inside one December week) and 135 in 2026, 10 months. So:
+
+- 2019-2024 have **no** threshold number to compare against;
+- 2025's 3 readings are one week of one month.
+
+There is no weak or modelled version of this comparison available, so the page states
+the wall with the counts instead of drawing a watts line. `watts_gate()` returns
+`can_compare_years = False` and the test asserts it.
+
+**Gotcha that cost a cycle:** the first version of the gate used "a year with >= 3
+readings counts as comparable". That declared 2025 comparable on 3 December-week
+readings and then claimed a comparison existed. The gate now needs BOTH
+`MIN_WATTS_YEAR_N = 12` readings AND `MIN_WATTS_YEAR_MONTHS = 3` distinct months.
+
+### 12c. Decisions worth not relitigating
+
+- **`power_np` is not offered as a measure.** Present for 139/139 sessions in 2020 but
+  only 30/141 in 2026, so a series on it stops mid-2026 for a data reason, not a
+  physiological one. `power_avg` has 1,039 rows across every year. (This is the same
+  column that produced the fraudulent old FTP proxy - do not reach for it.)
+- **The page reads `ctx.df_all`, not `ctx.df`.** The sidebar range defaults to
+  "Last 6 months"; applying it here would delete 2019-2025 and leave a page whose
+  entire subject was filtered away. The page says so in the header rather than
+  silently ignoring the control.
+- **`MIN_CELL_N = 3`, and a thin year gets NO point at all.** `connectgaps=False`
+  then breaks the line there. Interpolating across a missing year is the "promising a
+  line the chart does not show" failure.
+- **"vs previous year" means the previous year in the SAME duration class that
+  cleared the floor**, not year-1, and the year gap is printed. BILLAT 2022 -> 2025
+  reads "3y". Without this a 3-year change reads as a 1-year change.
+- **Session duration classes** are `under 45 / 45-90 / 90-150 / 150-240 / 240+` min.
+  The whole-minute halves-DOWN rule governs REP lengths; at session scale a minute
+  grid is meaningless. Exact `h:mm:ss` is reported alongside every cell.
+
+### 12d. A second blank-label definition bit, and it would have been invisible
+
+`ml/year_over_year.py` first defined its own blank-label test and kept **1,043**
+sessions. `core.data` keeps **1,039**. The difference is the em dash in
+`BLANK_TYPE_TOKENS = {"—", "-", "", "nan", "None"}`, which the local copy did not
+have - plus the local copy's case-insensitive match would have pulled in extra
+tokens the loader keeps.
+
+The module now imports `BLANK_TYPE_TOKENS` from `core.data` and uses the loader's
+exact predicate, and the test asserts parity (`1039 == 1039`). Same class of bug as
+11c: two definitions of "missing" drifting apart, producing a *confident* wrong count
+rather than an error. `ml/composition_intervals.py` already imports from `core.theme`,
+so the `ml -> core` dependency is precedented.
+
+### 12e. Verification
+
+- 862 drawn points across every type x measure - all on cells clearing the floor, no
+  duplicates, none outside the declared class set.
+- 70 deltas, each with both years above the floor and the stated gap matching the two
+  years actually compared.
+- Real `render()` under stubbed Streamlit for AEROBIC BASE (2 figures / 21 markers),
+  END (17), BILLAT (5) and Q-I INTERVALS (correct early return, 0 figures).
+- Legends land in a margin lane (`y=1.0`, horizontal, top margin 74 -> 96), never over
+  data, via the existing `_lane_legend` imported from `views/intervals_view.py` - not a
+  second implementation of the lane rule.
+- Two defects the render dump exposed and fixed: the exact-length table was listing
+  years that were NOT drawable (a 1-session median length next to a 37-session one),
+  and a column header read "Median average power".
+- 9/9 tests pass, including the 8 pre-existing ones.
+
+### 12f. Still not answerable
+
+Pre-2025 threshold watts do not exist, so year-over-year *threshold* comparison is
+impossible; only training-side comparison is real. Heat remains step 2 and is NOT a
+third dimension of this page: adding heat bands to (type x duration x year) leaves
+only 4 cells with n >= 15, so it would destroy every line. Heat gets its own section,
+within one type and one duration class only, and `efficiency` (W/bpm, 757 rows) is the
+only fitness-normalised heat-response variable that exists - `power_avg` alone is
+confounded by eight years of fitness gain.
