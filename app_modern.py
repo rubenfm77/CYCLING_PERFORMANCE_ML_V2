@@ -7,8 +7,9 @@
 # This file is the ROUTER of a real multipage app (st.navigation / st.Page):
 #   - persistent chrome on every page: top bar (brand + live status + state/
 #     KPI chips), the navigation pill bar, and the sidebar filters;
-#   - seven pages with real URLs (/fitness, /forecast, /intervals, ...):
-#     Overview · Fitness · Forecast · Intervals · Training · Trends · Sessions.
+#   - eight pages with real URLs (/fitness, /forecast, /intervals, ...):
+#     Overview · Fitness · Forecast · Intervals · Training · Evolution ·
+#     Trends · Sessions.
 # Design: keep the GitHub-dark + blue identity of app.py, presented with
 # modern components (gradient hero, accent-strip cards, icon section headers).
 
@@ -27,8 +28,8 @@ from core.components import inject_css, topbar          # noqa: E402
 from core.context import frames, render_sidebar         # noqa: E402
 from core.data import load_data                         # noqa: E402
 from core.metrics import headline                       # noqa: E402
-from views import (fitness, forecast, intervals_view, overview, sessions,  # noqa: E402
-                   training, trends)
+from views import (evolution, fitness, forecast, intervals_view, overview,  # noqa: E402
+                   sessions, training, trends)
 
 inject_css()
 
@@ -49,6 +50,8 @@ _SPECS = [
     ("training", "🏋️", "Training", partial(training.render, head, ctx), False),
     ("trends",   "📊", "Trends",   partial(trends.render, head, ctx),   False),
     ("sessions", "📅", "Sessions", partial(sessions.render, head, ctx), False),
+    ("evolution", "\U0001F4C8", "Evolution",
+     partial(evolution.render, head, ctx), False),
 ]
 
 _pages, _by_slug = [], {}
@@ -87,5 +90,5 @@ if choice != current and choice in _by_slug:
 nav.run()
 
 st.markdown("---")
-st.caption("app_modern.py — multipage dashboard (7 pages, real URLs) · "
+st.caption("app_modern.py — multipage dashboard (8 pages, real URLs) · "
            "`app.py` remains untouched and runnable")
