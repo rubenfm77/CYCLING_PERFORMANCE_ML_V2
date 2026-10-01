@@ -328,76 +328,8 @@ def render(head, ctx):
                 "from 2025 onward only.",
                 C["muted"], icon="ℹ️")
 
-    section("Pattern vs next-month threshold change")
-    _valid = _outcome_df[_outcome_df["ftp_gain"].notna()]
-    # Grouping months into "patterns" and ranking them by average gain is an
-    # inference. It needs enough months to mean something. Below the floor we show
-    # the measured months and refuse to group them — showing nothing beats showing
-    # noise.
-    MIN_GAIN_MONTHS = 12
-
-    if len(_valid) >= MIN_GAIN_MONTHS:
-        cc = st.columns(2)
-        with cc[0]:
-            st.caption(
-                "Single-dominant: one type >50% of quality TSS. Mixed: ≥2 types share "
-                "it. Δ = next month's best ~20-min effort minus this month's, in watts."
-            )
-            _pat = (_valid.groupby("pattern")
-                    .agg(Months=("ftp_gain", "count"), Avg_gain=("ftp_gain", "mean"),
-                         Median_gain=("ftp_gain", "median"), Avg_TSS=("total_tss", "mean"))
-                    .reset_index().sort_values("Avg_gain", ascending=False).round(1))
-            _pat.columns = ["Pattern", "Months", "Avg Δ (W)", "Median Δ (W)", "Avg TSS"]
-            _pat["Reliable"] = _pat["Months"].apply(lambda n: "✓" if n >= 5 else "⚠ n<5")
-            st.dataframe(_pat, width="stretch", hide_index=True,
-                         column_config={
-                             "Avg Δ (W)": st.column_config.NumberColumn(format="%.1f"),
-                             "Median Δ (W)": st.column_config.NumberColumn(format="%.1f"),
-                         })
-            st.caption(f"⚠️ {len(_valid)} independent monthly observations — "
-                       "directional, not statistically robust.")
-        with cc[1]:
-            st.caption("Top-3 types by TSS share per month, ranked by avg next-month Δ.")
-            _combo = (_valid.groupby("combo")
-                      .agg(Months=("ftp_gain", "count"), Avg_gain=("ftp_gain", "mean"),
-                           Avg_TSS=("total_tss", "mean"))
-                      .reset_index().sort_values("Avg_gain", ascending=False).head(15).round(1))
-            _combo.columns = ["Combination", "Months", "Avg Δ (W)", "Avg TSS"]
-            _combo["Reliable"] = _combo["Months"].apply(lambda n: "✓" if n >= 3 else "⚠ n<3")
-            st.dataframe(_combo, width="stretch", hide_index=True,
-                         column_config={"Avg Δ (W)": st.column_config.NumberColumn(format="%.1f")})
-            st.caption("Most combinations appear only 1–2 times; only ✓ rows "
-                       "(n ≥ 3) are directional.")
-    else:
-        callout(
-            "Not enough measured months to rank patterns",
-            f"Grouping months by training pattern and ranking them by average "
-            f"threshold gain needs at least {MIN_GAIN_MONTHS} months with a measured "
-            f"~20-min effort. There are {len(_valid)}. Ranking {len(_valid)} months "
-            f"would produce a ranking of noise, so it is not shown. The measured "
-            f"months themselves are below — those are facts.",
-            C["yellow"], icon="🔍",
-        )
-        if len(_proxy_monthly):
-            _raw = _proxy_monthly[["month_dt", "pm_ftp", "pm_n", "ftp_gain", "eftp_m"]].copy()
-            _raw = _raw[_raw["pm_ftp"].notna() | _raw["eftp_m"].notna()]
-            _raw["Month"] = _raw["month_dt"].dt.strftime("%b %Y")
-            _raw = _raw.rename(columns={
-                "pm_ftp": "Best ~20-min (W)", "pm_n": "Efforts",
-                "ftp_gain": "Δ vs prev (W)", "eftp_m": "eFTP (W)"})
-            _raw = _raw[["Month", "Best ~20-min (W)", "Efforts", "Δ vs prev (W)", "eFTP (W)"]]
-            st.dataframe(_raw.round(1), width="stretch", hide_index=True,
-                         column_config={
-                             "Best ~20-min (W)": st.column_config.NumberColumn(format="%.0f"),
-                             "Δ vs prev (W)": st.column_config.NumberColumn(format="%+.0f"),
-                             "eFTP (W)": st.column_config.NumberColumn(format="%.0f"),
-                         })
-            st.caption(
-                "Best ~20-min = highest peak-meter FTP among 18–25 min efforts that "
-                "month. A month with 1 effort is one ride, not a level. Widening the "
-                "window would add months but mix protocols, which is not a "
-                "comparison — it is a different measurement."
-            )
+    # Removed: invented pattern/combo taxonomy (does not match the 11 agreed types).
+    # The training-type analysis below uses the athlete's own labels only.
 
     # ── Training type analysis (all time) ──────────────────────────────────
     section("🏋️ Training type analysis")

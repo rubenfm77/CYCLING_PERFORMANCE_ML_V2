@@ -62,6 +62,9 @@ MIN_CI_SESSIONS = 5      # distinct days needed for a bootstrap 95% CI — below
 #                         and the interval is fiction, so it stays blank
 
 FAMILY_ORDER = [
+    # The athlete's own label, and it comes first. A 30 s set from a session
+    # filed under BILLAT is a BILLAT set, whatever the measured recovery did.
+    "BILLAT",
     "Ronnestad-style (30 s on / 15 s off)",
     "Billat-style (30 s on / 30 s off)",
     "micro-reps",
@@ -72,6 +75,7 @@ FAMILY_ORDER = [
     "single efforts",
 ]
 FAMILY_SHORT = {
+    "BILLAT": "BILLAT",
     "Ronnestad-style (30 s on / 15 s off)": "Ronnestad 30/15",
     "Billat-style (30 s on / 30 s off)": "Billat 30/30",
     "micro-reps": "micro-reps",

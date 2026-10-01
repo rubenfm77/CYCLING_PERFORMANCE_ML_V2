@@ -15,7 +15,8 @@ import requests
 import streamlit as st
 
 from core.theme import (
-    BLANK_TYPE_TOKENS, C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, WEIGHT_KG,
+    BLANK_TYPE_TOKENS, C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, TYPE_ALIASES,
+    WEIGHT_KG,
 )
 
 # ── Threshold-effort definition — ONE definition, imported everywhere ─────────
@@ -262,6 +263,31 @@ def _carry_csv_labels(base: pd.DataFrame, recent: pd.DataFrame) -> int:
     return carried
 
 
+def _apply_type_aliases(df: pd.DataFrame) -> int:
+    """Rewrite alias spellings of a training type onto the agreed spelling.
+
+    "Ronnestad" and "Billat" are the same session type in Spanish and Catalan.
+    Left as separate strings they become two training types, and every type-based
+    chart then shows them as series that can never be compared across the years.
+
+    Exact string match only, and BEFORE dedup: the dedup rule below compares two
+    labels to decide whether they are the same session, and comparing "RONNESTAD"
+    against "BILLAT" would have it treat one ride filed in two languages as two
+    different sessions. The count is recorded so the app can disclose it rather
+    than quietly changing what the athlete wrote.
+    """
+    if "training_type" not in df.columns or not len(df):
+        return 0
+    lab = df["training_type"].astype(object)
+    stripped = lab.astype(str).str.strip()
+    hit = stripped.isin(TYPE_ALIASES)
+    if not hit.any():
+        return 0
+    n = int(hit.sum())
+    df.loc[hit, "training_type"] = stripped[hit].map(TYPE_ALIASES)
+    return n
+
+
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
     base_df = None
@@ -302,6 +328,19 @@ def load_data() -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     df.attrs["labels_carried"] = _carried_labels
+
+    # Alias spellings collapse onto the agreed label BEFORE the duplicate-ride
+    # rule below compares labels, so one ride filed as "RONNESTAD" and another as
+    # "BILLAT" is recognised as the same session rather than kept as two.
+    df.attrs["labels_aliased"] = _aliased = _apply_type_aliases(df)
+    if _aliased:
+        st.caption(
+            f"{_aliased:,} session label(s) written as an alias were read as "
+            f"{', '.join(sorted(set(TYPE_ALIASES.values())))} "
+            f"({', '.join(f'{k} -> {v}' for k, v in sorted(TYPE_ALIASES.items()))}). "
+            f"They are the same session type, so they are counted together and "
+            f"can be compared across years."
+        )
 
     for col in ["tss", "power_avg", "hr_avg", "duration_h", "elevation",
                 "if_score", "power_np", "power_max", "cadence"]:

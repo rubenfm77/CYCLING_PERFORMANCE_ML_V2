@@ -661,7 +661,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "is \"4 min\", and the same rule applies at every minute (2.5–3.5 → "
         "3 min, 3.5–4.5 → 4 min …). The detector wobbles ±10 s on the same "
         "programmed effort, so finer classes would split one workout into "
-        "two fake series; a 30 s Ronnestad rep keeps its real-world 30 s. "
+        "two fake series; a 30 s rep keeps its real-world 30 s. "
         "Every row of the detail table still shows the exact measured "
         "length. Family names are heuristics from "
         "rep length + measured rest, shown next to the raw numbers; single "
@@ -967,9 +967,12 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "measured rep length follows in seconds — `4 min · 240 s` and "
         "`4 min · 230 s` are different matches, because two sets are only "
         "ever compared with work inside 10 s of each other. Rest between "
-        "reps is measured from the recovery rows — that's what separates a "
-        "Ronnestad (15 s off) from a Billat (30 s off). Family names are "
-        "heuristics from those numbers, always shown next to the raw values."
+        "reps is measured from the recovery rows and is always shown. Where "
+        "you have filed the session under a training type, that label is what "
+        "the family is called — a 30 s set from a BILLAT ride is a BILLAT set, "
+        "whatever the measured recovery did. Family names are otherwise "
+        "heuristics from rep length + measured rest, always shown next to the "
+        "raw values."
     )
     sets = build_sets(iv_full, acts, df_all)
     if len(sets) < 3:

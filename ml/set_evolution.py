@@ -30,7 +30,7 @@ SET_COLUMNS = [
     "set_hr", "intensity", "load", "cad", "decoupling", "first_seq",
     "last_seq", "rest", "name", "temp", "ctl", "atl", "tsb", "tss_7",
     "acwr", "moving_time", "act_iv_n", "act_iv_secs", "act_iv_dist",
-    "set_ss_cp_w", "set_ss_w_prime_kj", "set_w5s_cv",
+    "set_ss_cp_w", "set_ss_w_prime_kj", "set_w5s_cv", "db_type",
 ]
 
 # Duration classes for the evolution-by-duration view (same edges as the
@@ -135,6 +135,22 @@ def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
     else:
         sets["name"] = ""
         sets["moving_time"] = np.nan
+    # The athlete's OWN training type for the session each set came from.
+    #
+    # Merged on the activity id, never asof/backward on the date. A backward fill
+    # would hand a set the label of whichever ride happened to precede it, and a
+    # label that names the wrong workout is the one thing a label may not do.
+    if df_all is not None and len(df_all) and "id" in df_all.columns:
+        _lab = (df_all.assign(_id=df_all["id"].astype(str),
+                              _lt=df_all["training_type"].astype(str).str.strip())
+                .drop_duplicates("_id")[["_id", "_lt"]]
+                .rename(columns={"_id": "activity_id", "_lt": "db_type"}))
+        sets = sets.merge(_lab, on="activity_id", how="left")
+    if "db_type" not in sets.columns:
+        sets["db_type"] = ""
+    else:
+        sets["db_type"] = sets["db_type"].fillna("")
+
     w["distance"] = pd.to_numeric(w.get("distance"), errors="coerce")
     fp = (w.groupby("activity_id")
           .agg(act_iv_n=("seq", "size"),
@@ -328,11 +344,26 @@ def _bucket(value: float, step: float) -> int:
     return int(np.floor(float(value) / step + 0.5) * step)
 
 
-def _style(rep_secs, reps, rest) -> str:
+def _style(rep_secs, reps, rest, db_type=None) -> str:
     """Heuristic family name from rep length + measured rest + reps.
 
     Raw numbers are always shown next to the label — these are protocol
     patterns, not labels typed by intervals.icu.
+
+    The athlete's own label wins where it applies, and it applies to exactly one
+    case. `_style` splits 30 s reps on MEASURED REST, calling a 16 s recovery
+    "Ronnestad-style" and a 31 s recovery "Billat-style". On this athlete's file
+    that produced the opposite of the truth in both directions: all six sessions
+    the app called "Ronnestad-style" are sessions the athlete filed under BILLAT,
+    and the two it called "Billat-style" are an AEROBIC BASE ride. So the family
+    name was contradicting the athlete's own categorisation, and the BILLAT
+    sessions could never sit on one BILLAT series to be compared across years.
+
+    So a 30 s set from a session the athlete labelled BILLAT is BILLAT. The
+    measured rest is still computed and still shown - it is a real measurement of
+    a real difference - but it no longer gets to rename the workout. Sessions the
+    athlete did NOT label BILLAT keep the protocol name, because there the
+    heuristic is the only description there is.
     """
     try:
         rep_secs = float(rep_secs)
@@ -341,6 +372,8 @@ def _style(rep_secs, reps, rest) -> str:
         return ""
     rest = float(rest) if rest is not None and not np.isnan(rest) else np.nan
     if 24 <= rep_secs <= 40 and reps >= 8:
+        if str(db_type or "").strip() == "BILLAT":
+            return "BILLAT"
         if not np.isnan(rest):
             if 10 <= rest <= 22 and reps >= 15:
                 return "Ronnestad-style (30 s on / 15 s off)"
@@ -372,8 +405,10 @@ def add_signatures(sets: pd.DataFrame):
     s["rep_b"] = rep_b
     s["reps_b"] = reps_b
     s["sig"] = [_sig_label(nb, rb) for rb, nb in zip(rep_b, reps_b)]
-    s["style"] = [_style(r, n, t)
-                  for r, n, t in zip(s["rep_secs"], s["reps"], s["rest"])]
+    _db = s["db_type"] if "db_type" in s.columns else [""] * len(s)
+    s["style"] = [_style(r, n, t, d)
+                  for r, n, t, d in zip(s["rep_secs"], s["reps"], s["rest"],
+                                        _db)]
 
     clusters = (s.groupby("sig", sort=False)
                 .agg(n_sets=("set_w", "size"),

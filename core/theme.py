@@ -25,6 +25,34 @@ from src.config import ATHLETE, MAIN_TYPES, ZONES, TYPE_COLOURS
 # drop sessions, and the count that comes out the other end looks confident.
 BLANK_TYPE_TOKENS = {"—", "-", "", "nan", "None"}
 
+# ── Alias labels: the SAME workout, written in the other language ────────────
+# The athlete is bilingual and the workout comments are bilingual with them
+# ("PLA", "entre", "R recoveries"). "Ronnestad" and "Billat" are the same
+# session type in Spanish and Catalan — a long endurance ride. Left alone they
+# become TWO types, and a type-based chart then shows them as separate series
+# that can never be compared against each other across the years, which is the
+# opposite of what the athlete wants when they file a session under either name.
+#
+# So an alias is rewritten to the agreed spelling ON LOAD, before dedup, so:
+#   * it can never become a 12th training type and fragment every type view
+#   * the historical years and the current year land in one comparable series
+#   * no existing label is touched — only the alias spelling is rewritten
+#
+# Keys are matched EXACTLY, like BLANK_TYPE_TOKENS above and for the same
+# reason: matching loosely here would silently re-file real sessions. Every
+# target must be one of the agreed types; that is asserted at import, because a
+# mapping pointing at a type that does not exist would create the very split it
+# exists to prevent.
+TYPE_ALIASES = {
+    "RONNESTAD": "BILLAT",
+}
+
+_ALIAS_TARGETS_OK = set(TYPE_ALIASES.values()) <= set(MAIN_TYPES)
+assert _ALIAS_TARGETS_OK, (
+    f"TYPE_ALIASES points at a label that is not one of MAIN_TYPES: "
+    f"{sorted(set(TYPE_ALIASES.values()) - set(MAIN_TYPES))}"
+)
+
 # ── Palette ──────────────────────────────────────────────────────────────────
 C = {
     "bg":      "#0d1117",
@@ -138,5 +166,5 @@ __all__ = [
     "IF_Z2_MAX", "IF_THRESHOLD", "IF_VO2", "HOT_TEMP_C",
     "H_CARD", "H_STD", "H_PAIR", "H_HERO",
     "CHART_CONFIG", "style_figure", "ZONES", "MAIN_TYPES",
-    "BLANK_TYPE_TOKENS",
+    "BLANK_TYPE_TOKENS", "TYPE_ALIASES",
 ]
