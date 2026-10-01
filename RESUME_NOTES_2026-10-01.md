@@ -219,3 +219,78 @@ Force sync pulled 3,674 rows at 99.6 % coverage.
    become first-class in the horizon selectbox, or stay 28-only? *Unanswered question.*
 6. **Screenshot-unreadable** — the `browser.preview` path exists in the tool catalog; it
    was never tried as a workaround for reading UI images.
+
+---
+
+## 10. Addendum, same day — FTP auto-label + duplicate rides (commit `0db0799`)
+
+Two plumbing bugs found while trying to make the user's real threshold work visible.
+Both were inflating the Training page; both are fixed in `core/data.py`.
+
+### 10a. The same ride was counted twice, 63 times
+
+Nothing in the frame said "duplicate". The pairs have **different intervals.icu ids** and
+different `source` (`WAHOO` = head unit, `UPLOAD` = manual upload of the same ride), so
+`drop_duplicates` on any id column is blind to them. They also differ in TSS by up to 50,
+because only the head-unit copy carries heart rate — so they are not byte-identical
+either. What *is* identical: duration to the second, and distance to the centimetre.
+
+Rule now in `load_data()`: same calendar day, duration within `DUPE_DUR_TOL_S` (90 s), and
+**power within 3 W OR distance within 1 m**. The distance branch is not redundant — 10 of
+the 63 pairs carry no `power_avg` on either copy, and those are exactly the rows a
+power-based test cannot see. The more complete record wins, which keeps the head-unit copy
+and its heart rate.
+
+Plus 8 byte-identical rows in 2022/2023/2025, caught by an exact-key `drop_duplicates`.
+
+| | before | after |
+|---|---|---|
+| rows | 1,164 | **1,093** |
+| total TSS | 151,539 | **143,334** (−5.7 %) |
+| hours | 2,947 | 2,764 |
+| km | 106,426 | 102,374 |
+| CTL / ATL / TSB | 130.3 / 135.4 / −5.1 | 130.2 / 135.4 / −5.2 |
+
+A 5.7 % overstatement of lifetime volume. The 68 real two-ride days are untouched: 5
+survive, no genuine pair lands inside both windows, and zero near-duplicates remain
+(verified two ways).
+
+**The measured threshold series did not move** — the best ~20 min number in all 10 months
+is identical before and after. What was wrong was the effort **count** beside it: Mar 14 →
+7, May 14 → 7, Apr 8 → 4. A lesson worth keeping: a duplicate that only ever appeared as a
+*count* and never as a *value* will never show up in a before/after diff of the headline
+number. Check the denominators.
+
+### 10b. The FTP auto-label — one rule, declared and listed on the page
+
+`_match_type` only trusts intervals.icu workout-name fields, so 110 sessions had no type and
+appeared in **no** type-based view. Yesterday's ride (`Pepper it up`, 244 W peak over 22
+min) was one of them. 9.2 % of all TSS sat in that blind spot.
+
+Rule, applied only where there is no label: the session contains an **18–25 min**
+peak-meter effort at **≥ 95 % of that session's own eFTP**. Per-session eFTP, never today's
+— it is a rolling value, and applying the current one to an old ride is anachronistic.
+
+The window and the fraction now live in `core/data.py` as `FTP_AUTO_MIN_S`,
+`FTP_AUTO_MAX_S`, `FTP_AUTO_FRAC` and are **imported by `views/training.py`**, so the label
+a session gets and the number the measured-threshold chart plots cannot drift apart.
+
+It catches **7** sessions. That is the honest answer, not a shortfall — the recent log is
+dominated by 7.5 min efforts at 120 % of eFTP, which are correctly *not* threshold, and
+below 18 min the peak-meter number is not comparable across rides at all.
+
+Nothing is overwritten silently: `training_type_raw` keeps what the API said, `label_source`
+records `workout` / `auto-ftp` / `unlabelled` for every row, and the page carries a
+disclosure listing all 7 caught sessions with their window and % of eFTP.
+
+**Still open, deliberately.** The 110 unlabelled sessions are mostly steady "ronnestad"
+rides. Labelling those by intensity factor is a much larger inference than the one rule
+above, so it is *not* done. It is a decision for the user, not a guess to make.
+
+### 10c. Test-harness gotcha
+
+`st.expander` / `container` / `tabs` / `form` / `popover` are context managers. The stub in
+`test_render.py` returned `None` for them, so **the body of every `with` block was silently
+never executed** — the new disclosure rendered nothing under test and the failure surfaced
+only when the stub was fixed. Any new UI code inside a `with` block is untested until the
+stub handles it.
