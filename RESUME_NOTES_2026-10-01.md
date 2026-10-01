@@ -566,3 +566,101 @@ agreement between the loader's blank-label predicate and the module's own.
 This also means any threshold number quoted from this pipeline is a snapshot. The
 STRUCTURAL finding is stable because 2025's 3 readings come from the CSV, outside
 the 60-day overlay window - the overlay can only add 2026.
+---
+
+## 14. Addendum - second occurrence, and the amplifier is now removed (commit `fdeedd1`)
+
+The same ImportError came back after `78d4e8b`, one module over:
+
+```
+ml/year_over_year.py:104  from core.theme import BLANK_TYPE_TOKENS   ->  ImportError
+```
+
+### 14a. The remote was verified BEFORE any code was touched
+
+| check | result |
+|---|---|
+| `origin/main:core/theme.py` defines the constant | YES, line 26 |
+| fresh `git clone` -> import `core.theme`, `core.data`, `ml.year_over_year`, `views.evolution` | all OK |
+| anything from my working tree on `sys.path` during that clone test | none |
+| line 104 of the CLONED `ml/year_over_year.py` | exactly the traceback line |
+
+So Cloud *had* picked up `78d4e8b`. **This was never a code defect.**
+
+### 14b. Why an inconsistent Cloud checkout is not reachable from git
+
+`78d4e8b` moved `core/theme.py` and edited `ml/year_over_year.py` in **the same
+commit**. A git checkout cannot have one file from a commit without the other.
+Therefore the Cloud tree was inconsistent in a way git itself cannot produce -
+a stale/partial container, not a bad commit.
+
+**Lesson: verify the remote by cloning it, not by reading the local working
+tree.** The local tree always reflects the fix and proves nothing.
+
+### 14c. The fix is the amplifier, not the instance
+
+`app_modern.py` pulled in all eight pages with one statement:
+
+```python
+from views import (evolution, fitness, forecast, intervals_view, overview,
+                   sessions, training, trends)
+```
+
+executed at line 31, while BUILDING THE PAGE REGISTRY - hundreds of lines before
+`st.navigation()` at line 67. A module-level ImportError there is an **app-wide**
+crash. That is the whole reason a missing constant in one leaf module could blank
+all eight pages.
+
+Now each view is imported on its own via `importlib.import_module`:
+
+- a view that fails to import is replaced by a stand-in that says so and names
+  the exception;
+- a `st.warning` names the broken page on **every** page;
+- the other seven render normally;
+- `except Exception`, not `except ImportError` - the point is not to know in
+  advance what a page module may raise at import time.
+
+Consequence: the class of failure that produced two app-wide outages can now only
+ever cost **one** page, visibly.
+
+### 14d. The stand-in withholds anything that might not be safe to display
+
+Names the exception TYPE always. Shows the MESSAGE only for `ImportError`, which
+is a name-or-path resolution failure and cannot carry athlete data. Any other
+message is withheld and the user is pointed at Manage app -> Logs. This keeps the
+standing rule that a push must never expose athlete ID or API key, even in an
+error path.
+
+### 14e. `tests/test_page_isolation.py` - testing the router, not a copy of it
+
+The router's mechanism is `importlib.import_module(f"views.{name}")`, so patching
+`importlib.import_module` **before** `app_modern` runs makes it genuinely fail for
+a chosen module. That exercises the real router under a stubbed streamlit. Four
+cases: healthy, `ImportError`, `RuntimeError`, and a `RuntimeError` carrying a
+secret-looking string that must not reach the UI.
+
+Every failure case asserts: 8 pages still registered, 7 still wired to *real*
+module renders, the 8th wired to the stand-in, the stand-in renders without
+raising, and a warning is on screen.
+
+Suite is now **10/10**.
+
+### 14f. Traps hit while writing that test (harness bugs, not app bugs)
+
+- `functools.partial` keeps the callable in `.func`; `.args` holds
+  `(head, ctx)`. Asserting on `fn.args[0]` silently inspected `head`.
+- A streamlit stub used via `with st.sidebar:` needs `__enter__`/`__exit__`; a
+  plain function is not a context manager.
+- `except Exception` in the test harness needed the exception TYPE, not an
+  instance (`type(exc).__name__`), because instances have no `__name__`.
+
+All three produced confusing failures that looked like app defects. Same lesson
+as before: when a check fails, first ask whether the check or the code is wrong.
+
+### 14g. Deployment state
+
+`fdeedd1` is pushed. If Cloud is still serving an inconsistent tree, the new
+isolation means the seven healthy pages will load and Evolution alone will show
+the "could not be loaded" panel - which is itself the diagnostic. Recovery is
+Deployments -> **Rerun**; if that does not clear it, Delete + redeploy, which
+**loses the secrets and requires re-adding them**.
