@@ -36,8 +36,8 @@ from core.metrics import headline                       # noqa: E402
 # while BUILDING THE PAGE REGISTRY — hundreds of lines before st.navigation().
 #
 # A module-level ImportError in any one view is therefore an APP-WIDE crash. Not
-# the broken page: all eight. A missing constant in one leaf module once took the
-# whole dashboard down while the seven healthy pages could not render at all, and
+# the broken page: all of them. A missing constant in one leaf module once took
+# the whole dashboard down while every healthy page could not render at all, and
 # nothing in the UI could say why.
 #
 # Importing each module separately makes a page that cannot load visible and
@@ -47,8 +47,8 @@ from core.metrics import headline                       # noqa: E402
 # `except Exception` rather than `except ImportError` is deliberate. The entire
 # point is not to know in advance what a page module might raise on import; any
 # of it must not be allowed to reach the user as a blank dashboard.
-_VIEW_NAMES = ("evolution", "fitness", "forecast", "intervals_view", "overview",
-               "sessions", "training", "trends")
+_VIEW_NAMES = ("evolution", "fitness", "forecast", "interval_watts",
+               "intervals_view", "overview", "sessions", "training", "trends")
 
 _views, _view_errors = {}, {}
 for _name in _VIEW_NAMES:
@@ -105,6 +105,8 @@ _SPECS = [
     ("sessions", "📅", "Sessions", partial(_render_of("sessions"), head, ctx), False),
     ("evolution", "\U0001F4C8", "Evolution",
      partial(_render_of("evolution"), head, ctx), False),
+    ("interval-watts", "\U0001F3AF", "Interval watts",
+     partial(_render_of("interval_watts"), head, ctx), False),
 ]
 
 _pages, _by_slug = [], {}

@@ -17,9 +17,15 @@ mechanism is `importlib.import_module(f"views.{name}")`, so patching
 `importlib.import_module` before app_modern runs makes it genuinely fail.
 
 Cases:
-  A  all pages healthy            -> 8 registered, 8 real renders, no warning
-  B  a page raises ImportError    -> 8 registered, 7 real renders, message shown
+  A  all pages healthy            -> every module registered, all real renders,
+                                      no warning
+  B  a page raises ImportError    -> all still registered, one fewer real render,
+                                      message shown
   C  a page raises RuntimeError   -> same isolation, and its MESSAGE is withheld
+
+The page count is derived from app_modern._VIEW_NAMES, not hardcoded, so adding a
+page does not turn this test red for a reason that has nothing to do with
+isolation.
 """
 import os
 import sys
@@ -148,20 +154,31 @@ def run_case(label, break_module=None, exc=None):
         importlib.import_module = real
 
     specs, errs = AM._SPECS, AM._view_errors
+    # The page count is DERIVED, never hardcoded. A test that hardcodes "8" fails
+    # every time a page is legitimately added, which trains the reader to ignore
+    # it. What matters is that the registry, the module list and the specs agree.
+    n_expected = len(AM._VIEW_NAMES)
     print(f"  app_modern imported                : OK")
     print(f"  pages registered                  : {len(specs)}")
     print(f"  view modules loaded               : {len(AM._views)}")
     print(f"  view import errors                : {sorted(errs)}")
 
-    if len(specs) != 8:
-        FAILS.append(f"{label}: {len(specs)} pages registered, expected 8")
+    if len(specs) != n_expected:
+        FAILS.append(f"{label}: {len(specs)} pages registered, "
+                     f"expected {n_expected}")
+    if len(AM._VIEW_NAMES) != len(set(AM._VIEW_NAMES)):
+        FAILS.append(f"{label}: duplicate name in _VIEW_NAMES")
+    slugs = [s[0] for s in specs]
+    if len(slugs) != len(set(slugs)):
+        FAILS.append(f"{label}: duplicate slug in _SPECS {slugs}")
 
     # functools.partial keeps the callable in .func; .args holds (head, ctx).
     if not break_module:
         if errs:
             FAILS.append(f"{label}: unexpected errors {sorted(errs)}")
-        if len(AM._views) != 8:
-            FAILS.append(f"{label}: {len(AM._views)} modules, expected 8")
+        if len(AM._views) != n_expected:
+            FAILS.append(f"{label}: {len(AM._views)} modules, "
+                         f"expected {n_expected}")
         for slug, _i, _t, fn, _d in specs:
             mod = getattr(fn.func, "__module__", None)
             if not (isinstance(mod, str) and mod.startswith("views.")):
@@ -172,11 +189,13 @@ def run_case(label, break_module=None, exc=None):
         print("  no spurious warning               : OK")
         return
 
+    n_healthy = n_expected - 1
     broken_slug = SLUG_OF.get(break_module, break_module)
     if sorted(errs) != [break_module]:
         FAILS.append(f"{label}: errors {sorted(errs)}, expected ['{break_module}']")
-    if len(AM._views) != 7:
-        FAILS.append(f"{label}: {len(AM._views)} healthy modules, expected 7")
+    if len(AM._views) != n_healthy:
+        FAILS.append(f"{label}: {len(AM._views)} healthy modules, "
+                     f"expected {n_healthy}")
 
     n_real = 0
     for slug, _i, _t, fn, _d in specs:
@@ -188,9 +207,9 @@ def run_case(label, break_module=None, exc=None):
             n_real += 1
         else:
             FAILS.append(f"{label}: healthy page {slug} is not a real render")
-    print(f"  healthy pages still real renders  : {n_real}/7")
-    if n_real != 7:
-        FAILS.append(f"{label}: {n_real} real renders, expected 7")
+    print(f"  healthy pages still real renders  : {n_real}/{n_healthy}")
+    if n_real != n_healthy:
+        FAILS.append(f"{label}: {n_real} real renders, expected {n_healthy}")
 
     before = len(SINK["caption"])
     entry = [s for s in specs if s[0] == broken_slug][0]

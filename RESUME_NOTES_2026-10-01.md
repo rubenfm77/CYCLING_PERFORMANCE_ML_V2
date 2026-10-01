@@ -664,3 +664,174 @@ isolation means the seven healthy pages will load and Evolution alone will show
 the "could not be loaded" panel - which is itself the diagnostic. Recovery is
 Deployments -> **Rerun**; if that does not clear it, Delete + redeploy, which
 **loses the secrets and requires re-adding them**.
+
+## 15. Interval watts, not average watts
+
+The user rejected the measure the whole Evolution page had been built on:
+"i dont give a fuck about average watts". This section records what replaced it,
+and the two facts that constrain it permanently.
+
+### 15a. The six "unlabelled" ronnestad rows were duplicates, not sessions
+
+`probe_billat_fix.py` established that the six shape-matched rows with a blank
+`training_type` are exact duration twins (0 s apart) of records that survive
+`load_data()`'s dedup:
+
+| blank record | date | surviving twin | label |
+|---|---|---|---|
+| i156711936 | 2026-04-07 | i137901296 | VO2MAX |
+| i156712011 | 2026-04-15 | i140095919 | FTP |
+| i140666657 | 2026-04-17 | itself, label donated | FTP |
+| i156712053 | 2026-04-18 | i140867318 | AEROBIC BASE |
+| i156712110 | 2026-04-22 | i142054141 | FTP |
+| i144107462 | 2026-04-29 | itself, label donated | FTP |
+
+So "relabel the six unlabelled" is a **no-op** - the app already shows those
+rides under VO2MAX/FTP/AEROBIC BASE via the surviving twin. No CSV edit was made.
+The user then confirmed: **leave all 23 shape-matched sessions as they are**.
+BILLAT stays at 30 sessions across 2020/2021/2022/2025/2026.
+
+The 23 sessions the app shows for that shape are FTP 10, AEROBIC BASE 9, END 2,
+PIRAMIDAL 1, BILLAT 1.
+
+**The `data/` CSV is byte-identical to the last commit.** The `.bak` has been
+deleted.
+
+### 15b. Two sources that must never be joined
+
+```
+prescribed   WorkoutDescription, 239 parsed sessions, 2019-2025, ZERO in 2026
+measured     interval_summary,   639 detected efforts, 2025-2026
+```
+
+They cover different years and meet in exactly one. A line through both would be
+interpolating 2025-2026 out of nothing. They are separate functions, separate
+censuses and separate tabs, and the prescribed series must **stop at 2025** -
+carrying the last value forward is the single most tempting dishonesty in the
+module, so `coverage_note()` returns `prescribed_last_year` explicitly and the
+chart is expected to honour it.
+
+### 15c. Cell design, chosen by census rather than preference
+
+The forbidden comparison here is subtle: `3x1'` and `2x20'` are both "interval
+watts". So the bucket is REP LENGTH, not session length. Two candidates were
+measured before either was built:
+
+```
+A  (type x rep-class x year)                      34 drawable cells, 6 types >=2 years
+B  (type x rep-class x year x session-dur-class)  35 drawable cells, 4 types >=2 years
+```
+
+**A wins.** Session-length pooling is disclosed per cell (`dur_mix` column,
+surfaced in the hover) instead of being used as the bucket. Measured 2026 gives
+26 drawable cells on `(type x rep-class)`.
+
+Rep classes: `under 90s / 90s-5min / 5-10 min / 10-20 min / 20-30 min / 30+ min`.
+`under 90s` is deliberately not subdivided and the exact seconds travel with
+every row.
+
+### 15d. Parser rules that must not regress
+
+- `'` is **minutes**, `"` is **seconds**. Separate regex alternatives, never
+  merged. Reading `10"` as ten minutes inflates a sprint session 60x.
+- The gap between rep length and wattage may contain words but **not digits**.
+  That is what stops `4x15' pujada (10' recup -150w)` from borrowing the
+  recovery's watts.
+- Refused rather than guessed: `pols` (cadence), `10k/h` (speed), compound
+  structures where several efforts share one rep.
+- `MS:` scopes the main set; `WU:`/`CD:`/`MD:`/`FINAL:` are cut off.
+- Floors: rep >= 30 s and >= 100 W.
+- A reversed range is ordered, not emitted as a negative span.
+
+### 15e. The numbers, verbatim from the verified run
+
+Prescribed target watts, lower end, median per (type x rep class x year). Only
+cells that cleared n >= 3 are listed:
+
+```
+BILLAT   under 90s   2021 330(n=4)  -> 2022 350(n=10) -> 2025 375(n=8)   [gap 3y, stated]
+FTP      10-20 min   2020 225(n=5)  -> 2021 260(n=12) -> 2022 265(n=4)
+FTP      90s-5min    2021 305(n=4)  -> 2022 282(n=6)  -> 2023 265(n=4)  -> 2024 290(n=13)
+FTP      5-10 min    2020 275(n=4)  -> 2022 295(n=5)
+SST      10-20 min   2021 240(n=6)  -> 2022 245(n=5)  -> 2023 245(n=5)  -> 2024 245(n=4)
+SST      5-10 min    2020 225(n=4)  -> 2021 245(n=6)
+SST      20-30 min   2022 245(n=4)
+VO2MAX   under 90s   2020 330(n=3)  -> 2021 350(n=5)  -> 2023 300(n=4)  -> 2024 320(n=8)
+VO2MAX   90s-5min    2020 290(n=4)  -> 2021 300(n=13)
+FATMAX   10-20 min   2023 195(n=5)  |  20-30 min 2023 195(n=4)  |  30+ min 2023 195(n=3)
+FATMAX   5-10 min    2025 195(n=3)
+TEMPO    10-20 min   2024 225(n=11) |  20-30 min 2022 225(n=4)  |  90s-5min 2024 225(n=4)
+TORQUE   90s-5min    2021 255(n=4)
+SPRINTS  under 90s   2025 450(n=4)
+```
+
+SST's 10-20 min chain is genuinely **flat** at 245 W for three straight years
+after 2021 - a real finding, not a broken chart. FATMAX and TEMPO hold one
+number for years, which is what a fixed aerobic target looks like.
+
+Measured detected efforts, 2026, median W by length class, n in brackets:
+
+```
+AEROBIC BASE  under 90s 272(n=81) | 90s-5min 214(n=140) | 5-10 min 206(n=55) | 10-20 min 200(n=6)
+BILLAT        under 90s 365(n=13) | 90s-5min 198(n=8)
+END           under 90s 269(n=17) | 90s-5min 217(n=41)  | 5-10 min 208(n=20) | 10-20 min 195(n=3)
+FATMAX        under 90s 330(n=8)  | 90s-5min 217(n=12)  | 5-10 min 223(n=4)
+FTP           under 90s 276(n=36) | 90s-5min 229(n=77)  | 5-10 min 229(n=40) | 10-20 min 241(n=12) | 20-30 min 195(n=3)
+PIRAMIDAL     under 90s 258(n=5)  | 90s-5min 218(n=11)  | 5-10 min 210(n=9)  | 10-20 min 214(n=3)
+TEMPO         90s-5min 253(n=3)
+VO2MAX        under 90s 266(n=6)  | 90s-5min 247(n=13)  | 5-10 min 249(n=3)
+```
+
+The honest read of FTP 2026: the 90s-5min and 5-10 min classes sit at **229 W**
+and only the 10-20 min class rises to **241 W**, from n=12. That is a coherent
+threshold-ish profile, but n=12 detected efforts is not a threshold test and
+must not be called eFTP.
+
+These are **detected** efforts, not prescribed workouts: on a long ride the head
+unit also reports the rolling sections it found, which is why AEROBIC BASE has
+140 efforts in the 90s-5min column and why TEMPO's only cell is 3 efforts. The
+page says so in words; it must never be presented as "the interval the coach
+asked for".
+
+
+### 15f. Files
+
+- `ml/interval_watts.py` - new engine. `parse_prescribed`, `parse_measured`,
+  `prescribed`, `measured`, `prescribed_cells/evolution/yoy`,
+  `measured_cells`, `audit`, `coverage_note`, `rep_class`, `fmt_rep`,
+  `fmt_watts`. `MIN_CELL_N = 3`, deliberately a separate constant so
+  `year_over_year.py` cannot silently loosen it.
+- `views/interval_watts.py` - new page, slug `interval-watts`, title
+  "Interval watts", icon U+1F3AF. **9 pages now.** Three tabs: Measured,
+  Prescribed, What could be read. Reuses `_lane_legend`.
+- `tests/test_interval_watts.py` - new, **synthetic frames only**, so it needs no
+  credentials and runs anywhere. Real-data verification was done separately by
+  `verify_interval_watts.py` and `render_interval_page.py`.
+- `tests/test_page_isolation.py` - the hardcoded 8/7 counts are now **derived**
+  from `AM._VIEW_NAMES`, plus duplicate-name and duplicate-slug checks.
+- `app_modern.py` - `interval_watts` added to `_VIEW_NAMES` and `_SPECS`.
+
+### 15g. More harness bugs, same lesson
+
+- `st.columns(...)` in a stub must return a **list** of context managers. A
+  single object produces `'_Ctx' object is not subscriptable` and `cannot
+  unpack non-iterable`, which read as page defects and were not.
+- The stub also needs a real pass-through `cache_data`, because `core.data`
+  decorates its loaders with `@st.cache_data` at import time.
+- `duration_s` is **not a CSV column** - `load_data()` derives it. On the raw CSV
+  use `duration_h * 3600`.
+- My own check `y["gap_years"].dropna() == y["year"] - y["prev_year"].dropna()`
+  compared two differently-indexed series. The column was right; the check was
+  wrong. A synthetic fixture with a thin 2023 now pins the multi-year gap.
+
+### 15h. Still open
+
+- **Interval power for the eFTP target.** 241 W in the 10-20 min class for 2026
+  is the closest thing measured, but it is a median of detected efforts in
+  FTP-labelled rides, not a validated threshold test. Do not call it eFTP.
+- **Heat analysis** - untouched. Within one type and one duration class only.
+- **Weekly planner with rest weeks** - untouched, and must follow the heat and
+  interval findings rather than precede them.
+- The 15 custom label values still appear in no type-based chart.
+- The 48 empty-shell sessions still need a decision on blanking their distance.
+- The Intervals page is still the one the user calls unusable.
