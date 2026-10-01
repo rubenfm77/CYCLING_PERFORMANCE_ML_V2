@@ -193,6 +193,21 @@ def load_data() -> pd.DataFrame:
 
     df["tss"] = df["tss"].fillna(0)
 
+    # ── Canonical duration: MOVING seconds, one definition for every consumer ──
+    # `moving_time` (intervals.icu) is null on 1159/1159 rows of this athlete's
+    # history, so it cannot be the source. Measured agreement across the file:
+    #   duration_h*3600 == duration_secs   (exact on 192/257, median diff 0 s)
+    #   duration_h*3600 ~= Moving Time     (Garmin; median +9 s, p90 66 s)
+    #   duration_h*3600 <  Elapsed Time    (median -693 s — that one INCLUDES stops)
+    # So duration_h is moving time and is the only field populated on every row
+    # (1159/1159). `Moving Time` is the fallback for any row where it is missing.
+    _dur = pd.Series(np.nan, index=df.index, dtype="float64")
+    for _c in ("duration_h", "Moving Time"):
+        if _c in df.columns:
+            _v = pd.to_numeric(df[_c], errors="coerce")
+            _dur = _dur.fillna(_v * 3600.0 if _c == "duration_h" else _v)
+    df["duration_s"] = _dur
+
     # Some API rows return icu_intensity as a percentage (77.0) not a decimal.
     pct_mask = df["if_score"].notna() & (df["if_score"] > 2.0)
     df.loc[pct_mask, "if_score"] = df.loc[pct_mask, "if_score"] / 100

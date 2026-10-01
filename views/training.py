@@ -13,6 +13,13 @@ from core.theme import (C, FTP_CURRENT, FTP_TARGET, FTP_DRIVERS, H_CARD, H_PAIR,
                         ZONES, style_figure)
 
 
+def _num(df, col):
+    """Numeric view of a column that may be absent (API rows are sparse)."""
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce")
+
+
 def render(head, ctx):
     df, df_main, df_main_all, df_all = ctx.df, ctx.df_main, ctx.df_main_all, ctx.df_all
     date_range = ctx.date_range
@@ -195,31 +202,62 @@ def render(head, ctx):
     if not _outcome_df.empty:
         _outcome_df["_month"] = pd.PeriodIndex(_outcome_df["period"], freq="M")
 
-    # FTP proxy: best normalised power of the month × 0.95. Labelled a proxy
-    # everywhere — it is not a measured threshold test.
-    _pwr = pd.to_numeric(df_all["power_np"].fillna(df_all["power_avg"]), errors="coerce")
-    _px = df_all[["date"]].assign(_pwr=_pwr)
+    # ── Threshold power: real measurements only ────────────────────────────
+    # icu_pm_ftp_watts = intervals.icu's peak-meter FTP for the ride, measured over
+    # icu_pm_ftp_secs. The window is whatever the ride contained, so it is NOT
+    # comparable across rides — we keep only ~20-minute efforts (18–25 min), which
+    # is the protocol actually being trained, and never mix windows.
+    # eftp = intervals.icu rolling eFTP (a step function; it only moves when the
+    # load justifies it).
+    #
+    # DO NOT reintroduce the old `power_np x 0.95` proxy: power_np is null on all
+    # 188 of the 2026 sessions, so that silently plotted AVERAGE ride power and
+    # called it FTP. It looked plausible and meant nothing.
+    #
+    # Both of these fields exist only from 2025 onward. There is no honest
+    # pre-2025 threshold number in this dataset — the series starts late on
+    # purpose rather than being back-filled with a proxy.
+    PM_LO, PM_HI = 18 * 60, 25 * 60
+    _pm_w = _num(df_all, "icu_pm_ftp_watts")
+    _pm_s = _num(df_all, "icu_pm_ftp_secs")
+    _eftp = _num(df_all, "eftp")
+    _pm_ok = _pm_w.notna() & _pm_s.between(PM_LO, PM_HI)
+
+    _px = df_all[["date"]].assign(pm_w=_pm_w, eftp=_eftp, pm_ok=_pm_ok)
     _px["_month"] = _px["date"].dt.to_period("M")
-    _proxy_monthly = (_px[_px["_pwr"] > 50]
-                      .groupby("_month", as_index=False)["_pwr"].max()
-                      .rename(columns={"_pwr": "best_pwr"}))
-    _proxy_monthly["ftp_proxy"] = _proxy_monthly["best_pwr"] * 0.95
+    _proxy_monthly = _px[_px["pm_ok"]].groupby("_month", as_index=False).agg(
+        pm_ftp=("pm_w", "max"),          # best ~20-min expression that month
+        pm_n=("pm_w", "size"),          # how many supported it
+    )
+    # eFTP is a rolling value — take the last reading in the month, not the max.
+    _eftp_m = (_px.dropna(subset=["eftp"]).groupby("_month", as_index=False)["eftp"]
+               .last().rename(columns={"eftp": "eftp_m"}))
+    if len(_proxy_monthly) and len(_eftp_m):
+        _proxy_monthly = _proxy_monthly.merge(_eftp_m, on="_month", how="outer")
+    elif len(_eftp_m):
+        _proxy_monthly = _eftp_m.rename(columns={"eftp_m": "pm_ftp"}).assign(pm_n=0)
+    _proxy_monthly = _proxy_monthly.sort_values("_month")
     _proxy_monthly["month_dt"] = _proxy_monthly["_month"].dt.to_timestamp()
-    _proxy_monthly["ftp_trend"] = _proxy_monthly["ftp_proxy"].rolling(3, min_periods=2).mean()
-    _proxy_monthly["ftp_gain"] = _proxy_monthly["ftp_proxy"].diff()
+    _proxy_monthly["ftp_trend"] = _proxy_monthly["pm_ftp"].rolling(3, min_periods=2).mean()
+    _proxy_monthly["ftp_gain"] = _proxy_monthly["pm_ftp"].diff()
 
     if not _outcome_df.empty:
         _outcome_df = _outcome_df.merge(
-            _proxy_monthly[["_month", "ftp_proxy", "ftp_gain"]],
+            _proxy_monthly[["_month", "pm_ftp", "ftp_gain"]],
             on="_month", how="left")
     else:
-        _outcome_df["ftp_proxy"] = pd.Series(dtype="float64")
+        _outcome_df["pm_ftp"] = pd.Series(dtype="float64")
         _outcome_df["ftp_gain"] = pd.Series(dtype="float64")
 
     n_months = int(_outcome_df["period"].nunique()) if len(_outcome_df) else 0
-    st.caption(f"Full history: {len(_comp_all):,} labelled sessions across "
+    n_pm = int(_outcome_df["pm_ftp"].notna().sum()) if len(_outcome_df) else 0
+    st.caption(f"Composition: {len(_comp_all):,} labelled sessions across "
                f"{n_months} months ({df_all['date'].min():%b %Y} → "
-               f"{df_all['date'].max():%b %Y}).")
+               f"{df_all['date'].max():%b %Y}). "
+               f"Threshold power: {n_pm} of those months have a ~20-min effort to "
+               f"measure — peak-meter FTP and eFTP only exist from 2025, so the "
+               f"tables below use {n_pm} months, not {n_months}. Fewer rows, but "
+               f"they are measured watts instead of average power.")
 
     # Chart 1: Monthly composition — only if data exists
     if len(_monthly_type_tss) > 0:
@@ -240,72 +278,125 @@ def render(head, ctx):
         callout("No data", "No training types from MAIN_TYPES found in this range.",
                 C["muted"], icon="ℹ️")
 
-    # Chart 2: FTP proxy — only if data exists
+    # Chart 2: measured threshold power — peak-meter FTP + eFTP
     if len(_proxy_monthly) > 0:
+        _eftp_now = _num(df_all, "eftp").dropna()
+        _eftp_last = float(_eftp_now.iloc[-1]) if len(_eftp_now) else None
+        _pm = _proxy_monthly.dropna(subset=["pm_ftp"])
         fig_ref = go.Figure()
-        fig_ref.add_trace(go.Scatter(
-            x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_proxy"], mode="lines+markers",
-            name="FTP proxy (best NP × 0.95)", line=dict(color=C["purple"], width=2.5),
-            marker=dict(size=4), fill="tozeroy", fillcolor="rgba(188,140,255,0.08)"))
-        fig_ref.add_trace(go.Scatter(
-            x=_proxy_monthly["month_dt"], y=_proxy_monthly["ftp_trend"], mode="lines",
-            name="3-month trend", line=dict(color=C["accent"], width=2, dash="dash")))
-        fig_ref.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.5,
-                          annotation_text=f"{FTP_TARGET} W peak")
-        fig_ref.add_hline(y=FTP_CURRENT, line_dash="dot", line_color=C["yellow"],
-                          annotation_text=f"{FTP_CURRENT} W current")
+        if len(_pm):
+            fig_ref.add_trace(go.Scatter(
+                x=_pm["month_dt"], y=_pm["pm_ftp"], mode="lines+markers",
+                name="Best ~20-min effort (peak-meter FTP)",
+                line=dict(color=C["purple"], width=2.5), marker=dict(size=5),
+                customdata=_pm["pm_n"],
+                hovertemplate=("<b>%{y:.0f} W</b> · best 18–25 min effort"
+                               "<br>%{x|%b %Y} · from %{customdata} effort(s)"
+                               "<extra></extra>")))
+            fig_ref.add_trace(go.Scatter(
+                x=_pm["month_dt"], y=_pm["ftp_trend"], mode="lines",
+                name="3-month trend", line=dict(color=C["accent"], width=2, dash="dash"),
+                hovertemplate="%{y:.0f} W<extra></extra>"))
+        _ef = _proxy_monthly.dropna(subset=["eftp_m"])
+        if len(_ef):
+            fig_ref.add_trace(go.Scatter(
+                x=_ef["month_dt"], y=_ef["eftp_m"], mode="lines+markers",
+                name="eFTP (intervals.icu rolling)",
+                line=dict(color=C["green"], width=2, dash="dot"), marker=dict(size=4),
+                hovertemplate="eFTP %{y:.0f} W<extra></extra>"))
+        fig_ref.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.4,
+                          annotation_text=f"{FTP_TARGET} W pre-injury reference")
+        if _eftp_last:
+            fig_ref.add_hline(y=_eftp_last, line_dash="dot", line_color=C["yellow"],
+                              opacity=0.7, annotation_text=f"eFTP now {_eftp_last:.0f} W")
         fig_ref.add_vline(x=pd.Timestamp(SURGERY), line_dash="dash",
                           line_color=C["red"], opacity=0.7, annotation_text="Surgery")
-        style_figure(fig_ref, "FTP proxy — correlate with the composition bars above", H_CARD)
+        style_figure(fig_ref, "Measured threshold power — read with the composition bars above", H_CARD)
         legend(fig_ref, "left", horizontal=True)
         show(fig_ref)
+        st.caption(
+            f"Both series start in {_pm['month_dt'].min():%b %Y} — intervals.icu only "
+            f"reports peak-meter FTP and eFTP from 2025. {len(_pm)} months carry a "
+            f"~20-min effort; a month backed by a single effort is marked in the "
+            f"hover. Not comparable with anything before 2025, because no threshold "
+            f"measurement exists there."
+        )
     else:
-        callout("No data", "No power data > 50 W found for FTP proxy.",
+        callout("No threshold data",
+                "No ~20-min peak-meter effort found. intervals.icu reports this "
+                "from 2025 onward only.",
                 C["muted"], icon="ℹ️")
 
-    section("Pattern vs next-month FTP change")
-    cc = st.columns(2)
-    with cc[0]:
-        st.caption(
-            "Single-dominant: one type >50% of quality TSS. Mixed: ≥2 types share "
-            "it. FTP Δ = next month's proxy minus this month's."
-        )
-        _valid = _outcome_df[_outcome_df["ftp_gain"].notna()]
-        if len(_valid) > 0:
+    section("Pattern vs next-month threshold change")
+    _valid = _outcome_df[_outcome_df["ftp_gain"].notna()]
+    # Grouping months into "patterns" and ranking them by average gain is an
+    # inference. It needs enough months to mean something. Below the floor we show
+    # the measured months and refuse to group them — showing nothing beats showing
+    # noise.
+    MIN_GAIN_MONTHS = 12
+
+    if len(_valid) >= MIN_GAIN_MONTHS:
+        cc = st.columns(2)
+        with cc[0]:
+            st.caption(
+                "Single-dominant: one type >50% of quality TSS. Mixed: ≥2 types share "
+                "it. Δ = next month's best ~20-min effort minus this month's, in watts."
+            )
             _pat = (_valid.groupby("pattern")
                     .agg(Months=("ftp_gain", "count"), Avg_gain=("ftp_gain", "mean"),
                          Median_gain=("ftp_gain", "median"), Avg_TSS=("total_tss", "mean"))
                     .reset_index().sort_values("Avg_gain", ascending=False).round(1))
-            _pat.columns = ["Pattern", "Months", "Avg FTP Δ (W)", "Median Δ (W)", "Avg TSS"]
+            _pat.columns = ["Pattern", "Months", "Avg Δ (W)", "Median Δ (W)", "Avg TSS"]
             _pat["Reliable"] = _pat["Months"].apply(lambda n: "✓" if n >= 5 else "⚠ n<5")
             st.dataframe(_pat, width="stretch", hide_index=True,
                          column_config={
-                             "Avg FTP Δ (W)": st.column_config.NumberColumn(format="%.1f"),
+                             "Avg Δ (W)": st.column_config.NumberColumn(format="%.1f"),
                              "Median Δ (W)": st.column_config.NumberColumn(format="%.1f"),
                          })
             st.caption(f"⚠️ {len(_valid)} independent monthly observations — "
                        "directional, not statistically robust.")
-        else:
-            callout("Not enough data", "No monthly FTP gains yet in this range.",
-                    C["muted"], icon="ℹ️")
-    with cc[1]:
-        st.caption("Top-3 types by TSS share per month, ranked by avg next-month FTP gain.")
-        if len(_valid) > 0:
+        with cc[1]:
+            st.caption("Top-3 types by TSS share per month, ranked by avg next-month Δ.")
             _combo = (_valid.groupby("combo")
                       .agg(Months=("ftp_gain", "count"), Avg_gain=("ftp_gain", "mean"),
                            Avg_TSS=("total_tss", "mean"))
                       .reset_index().sort_values("Avg_gain", ascending=False).head(15).round(1))
-            _combo.columns = ["Combination", "Months", "Avg FTP Δ (W)", "Avg TSS"]
+            _combo.columns = ["Combination", "Months", "Avg Δ (W)", "Avg TSS"]
             _combo["Reliable"] = _combo["Months"].apply(lambda n: "✓" if n >= 3 else "⚠ n<3")
             st.dataframe(_combo, width="stretch", hide_index=True,
-                         column_config={
-                             "Avg FTP Δ (W)": st.column_config.NumberColumn(format="%.1f"),
-                         })
+                         column_config={"Avg Δ (W)": st.column_config.NumberColumn(format="%.1f")})
             st.caption("Most combinations appear only 1–2 times; only ✓ rows "
                        "(n ≥ 3) are directional.")
-        else:
-            callout("Not enough data", "No combinations to rank yet.",
-                    C["muted"], icon="ℹ️")
+    else:
+        callout(
+            "Not enough measured months to rank patterns",
+            f"Grouping months by training pattern and ranking them by average "
+            f"threshold gain needs at least {MIN_GAIN_MONTHS} months with a measured "
+            f"~20-min effort. There are {len(_valid)}. Ranking {len(_valid)} months "
+            f"would produce a ranking of noise, so it is not shown. The measured "
+            f"months themselves are below — those are facts.",
+            C["yellow"], icon="🔍",
+        )
+        if len(_proxy_monthly):
+            _raw = _proxy_monthly[["month_dt", "pm_ftp", "pm_n", "ftp_gain", "eftp_m"]].copy()
+            _raw = _raw[_raw["pm_ftp"].notna() | _raw["eftp_m"].notna()]
+            _raw["Month"] = _raw["month_dt"].dt.strftime("%b %Y")
+            _raw = _raw.rename(columns={
+                "pm_ftp": "Best ~20-min (W)", "pm_n": "Efforts",
+                "ftp_gain": "Δ vs prev (W)", "eftp_m": "eFTP (W)"})
+            _raw = _raw[["Month", "Best ~20-min (W)", "Efforts", "Δ vs prev (W)", "eFTP (W)"]]
+            st.dataframe(_raw.round(1), width="stretch", hide_index=True,
+                         column_config={
+                             "Best ~20-min (W)": st.column_config.NumberColumn(format="%.0f"),
+                             "Δ vs prev (W)": st.column_config.NumberColumn(format="%+.0f"),
+                             "eFTP (W)": st.column_config.NumberColumn(format="%.0f"),
+                         })
+            st.caption(
+                "Best ~20-min = highest peak-meter FTP among 18–25 min efforts that "
+                "month. A month with 1 effort is one ride, not a level. Widening the "
+                "window would add months but mix protocols, which is not a "
+                "comparison — it is a different measurement."
+            )
 
     # ── Training type analysis (all time) ──────────────────────────────────
     section("🏋️ Training type analysis")
