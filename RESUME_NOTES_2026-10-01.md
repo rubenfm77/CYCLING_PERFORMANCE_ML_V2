@@ -476,3 +476,93 @@ only 4 cells with n >= 15, so it would destroy every line. Heat gets its own sec
 within one type and one duration class only, and `efficiency` (W/bpm, 757 rows) is the
 only fitness-normalised heat-response variable that exists - `power_avg` alone is
 confounded by eight years of fitness gain.
+
+---
+
+## 13. Addendum - the app-wide ImportError, and the amplifier behind it (commit `78d4e8b`)
+
+The Evolution page took the WHOLE dashboard down, not just itself. All 8 pages
+went to a red screen. Worth understanding, because it will happen again.
+
+### 13a. What Cloud reported
+
+```
+app_modern.py line 31    from views import (evolution, fitness, forecast, ...)
+views/evolution.py:31    from ml import year_over_year as yoy
+ml/year_over_year.py:104 from core.data import BLANK_TYPE_TOKENS
+ImportError
+```
+
+### 13b. Why one missing constant killed 8 pages
+
+Look at the order inside `app_modern.py`:
+
+| line | what happens |
+|---|---|
+| 31 | `from views import (evolution, fitness, ...)` - every page module imported |
+| 67 | `st.navigation(_pages)` - page registry BUILT here |
+| 90 | `nav.run()` - pages actually render here |
+
+Every `views/*` module is imported at line 31 while the registry is being built,
+long before any page runs. So a module-level ImportError inside ANY view is an
+**app-wide** crash. The 7 pages that were perfectly healthy could not render at
+all. A crash *inside* `render()` is page-local (everything already drawn
+survives); a crash at *import* time is fatal to the run.
+
+### 13c. Why it failed at all
+
+`origin/main` == `HEAD` == `2b5d0fe`, and `core/data.py` on origin DOES define
+`BLANK_TYPE_TOKENS` (line 51, added in `652ede0`). Verified by reading the blob
+straight out of the remote. So the Cloud checkout was internally INCONSISTENT:
+the new `ml/year_over_year.py` sitting on a `core/data.py` older than
+`652ede0`. A stale-partial redeploy, not a bad commit.
+
+Recovery was Cloud -> Deployments -> **Rerun** (keeps secrets; Delete does not),
+then Ctrl+Shift+R.
+
+### 13d. The fix, because "just Rerun" is not a fix
+
+That import should never have been able to do this.
+
+- `BLANK_TYPE_TOKENS` now lives in **`core/theme.py`**, whose only import is the
+  leaf `src/config`. `core/data.py` imports it from there and **re-exports the
+  same object** under the same name, so every existing
+  `from core.data import BLANK_TYPE_TOKENS` keeps working and there is still
+  exactly ONE definition.
+- `ml/year_over_year.py` imports it from `core.theme`. The registry import can no
+  longer be killed by anything living in `core/data.py`.
+- **Why `core/theme.py` is the only correct home:** `core/data.py` imports from
+  `core/theme`, so nothing in `core/` may import an `ml/` module without a
+  circular import. A pure constant that `ml/` needs has to sit upstream of
+  `core/data.py`, and `core/theme.py` is that layer.
+- `tests/test_year_over_year.py` asserts the re-export IS the same object as
+  `core/theme`'s. A second literal in `core/data.py` now FAILS the suite instead
+  of silently costing 4 sessions (1043 vs 1039) the way it did in 12d.
+
+### 13e. Deliberately left alone
+
+`views/training.py` (`FTP_AUTO_*`) and `views/trends.py` (`safe_sum`, `safe_mean`)
+still import `core/data.py` at module level. Those names have existed since the
+repo began, so no plausible checkout skew removes them, and rewriting them would
+be churn against an already-negligible risk. The dangerous pattern was importing
+a NEWLY ADDED name that way, and there is now none.
+
+### 13f. `load_data()` output is NOT reproducible across processes
+
+`load_data()` merges a LIVE 60-day intervals.icu fetch over the local CSV, so:
+
+| quantity | observed across runs minutes apart |
+|---|---|
+| rows | 1,088 - 1,093 |
+| TSS | 143,334 (stable) |
+| threshold readings | 138 - 144 |
+
+Stable WITHIN one process, different BETWEEN them. My first verification script
+asserted those numbers exactly and flapped, which cost a cycle and briefly looked
+like the constant move had changed the data. **Never assert an API-derived count
+across runs.** Assert things the CSV owns: labelled sessions (1,039) and the
+agreement between the loader's blank-label predicate and the module's own.
+
+This also means any threshold number quoted from this pipeline is a snapshot. The
+STRUCTURAL finding is stable because 2025's 3 readings come from the CSV, outside
+the 60-day overlay window - the overlay can only add 2026.
