@@ -171,6 +171,29 @@ Force sync pulled 3,674 rows at 99.6 % coverage.
   git writes progress to stderr. Judge success by the `main -> main` line, not the code.
   `git add` does the same with its `LF will be replaced by CRLF` warning.
 - `git commit -m "multi line"` breaks on spaces — write the message to a file, use `-F`.
+- **PowerShell has no heredoc.** `git commit -F - <<'MSG'` is a parse error at `<<`.
+  Write the message to a temp file first, then `git commit -F <path>`.
+- **`core.autocrlf=true` and there is NO `.gitattributes`.** Measured 2026-10-01,
+  and it matters for any future CSV edit. The committed blob of
+  `data/combined_training_data.csv` is fixed at
+  `c67b429900b9282125d4a19ecd995b7ff09e0540`, but the *working tree* is not
+  reproducible from it. Byte-level:
+
+  ```
+  local checkout : 1,352,079 bytes  CR=1160  LF=1164  CRLF=1160  bareLF=4
+  fresh clone    : 1,352,083 bytes  CR=1164  LF=1164  CRLF=1164  bareLF=0
+  ```
+
+  Same blob, 4 bytes apart on disk: autocrlf promoted the 4 bare LFs inside
+  quoted description fields to CRLF on checkout. `git status` still calls the
+  file clean in both, because git compares against the filtered form.
+  **Never hardcode a CRLF count or a byte length as a CSV guard.** Measure the
+  baseline in the current checkout, or better compare `git rev-parse
+  HEAD:data/combined_training_data.csv` before and after — that is
+  filter-independent. Verify remote state with `git rev-parse HEAD:<path>` on a
+  clone, never by hashing the working tree. The 4 bare LFs are embedded
+  newlines inside quoted `WorkoutDescription` fields and are legitimate
+  content, not damage.
 - **The model cannot read images.** `read` on a PNG returns "this model does not support
   image input", and `browser.screenshot` fails with "Screenshot needs a visible tab".
   Every UI question must be asked as a *text* question ("do you see this exact caption?").
