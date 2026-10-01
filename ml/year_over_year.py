@@ -101,11 +101,17 @@ METRIC_BY_KEY = {m[0]: m for m in METRICS}
 # from the Training page, so this module imports the loader's set and uses the
 # loader's exact predicate. Labels outside MAIN_TYPES are the athlete's own
 # custom values — counted, never folded into a first-class type, never invented.
-from core.data import BLANK_TYPE_TOKENS  # noqa: E402
+from core.theme import BLANK_TYPE_TOKENS  # noqa: E402
 
 
 def _has_label(series: pd.Series) -> pd.Series:
-    """Exactly core.data's test: present, and not one of its blank tokens."""
+    """Exactly core.data's test: present, and not one of its blank tokens.
+
+    core.data re-exports this same constant, so the two predicates cannot drift;
+    it is imported from core.theme because core/theme has no import that could
+    leave it half-initialised. See the note on the constant in core/theme.py for
+    why that matters to the whole app rather than just this page.
+    """
     return series.notna() & ~series.astype(str).str.strip().isin(BLANK_TYPE_TOKENS)
 
 

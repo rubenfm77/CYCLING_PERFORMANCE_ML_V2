@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 
 from core.theme import (
-    C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, WEIGHT_KG,
+    BLANK_TYPE_TOKENS, C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, WEIGHT_KG,
 )
 
 # ── Threshold-effort definition — ONE definition, imported everywhere ─────────
@@ -46,9 +46,13 @@ DIST_COL = "distance_m"
 
 # Every spelling the sources use for "no label": `_match_type` returns an em dash
 # for an API row it could not match, and the Garmin CSV arrives with an empty cell.
-# Defined once so the label-carry step below and the blank test further down can
-# never disagree about what counts as unlabelled.
-BLANK_TYPE_TOKENS = {"—", "-", "", "nan", "None"}
+# Defined ONCE, in core/theme.py, and imported above — so the label-carry step
+# below, the blank test further down, and the ml/ pages can never disagree about
+# what counts as unlabelled. Do not re-declare it here; a second copy here is what
+# let ml/year_over_year.py keep 1043 sessions where this module keeps 1039.
+# Re-exported under the same name so `from core.data import BLANK_TYPE_TOKENS`
+# keeps working for existing callers.
+
 
 # ── Small helpers (same semantics as app.py) ──────────────────────────────────
 def safe_sum(s) -> float:

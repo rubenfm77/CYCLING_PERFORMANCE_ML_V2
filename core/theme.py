@@ -5,6 +5,26 @@
 
 from src.config import ATHLETE, MAIN_TYPES, ZONES, TYPE_COLOURS
 
+# ── "No training type" spellings — ONE definition, imported everywhere ───────
+# Every spelling the data sources use for a missing label: intervals.icu's
+# `_match_type` returns an em dash for an API row it could not match, the Garmin
+# CSV arrives with an empty cell, and pandas writes float NaN as the literal
+# string "nan" once a column has been through astype(str).
+#
+# This lives in core/theme.py, NOT core/data.py, and that placement is load-
+# bearing. core/data.py imports from core/theme, so nothing in core/ can import
+# an ml/ module without creating a circular import. When this set lived in
+# core/data.py, ml/year_over_year.py had to reach `from core.data import
+# BLANK_TYPE_TOKENS` at module level — and because app_modern.py imports every
+# views/* module while BUILDING THE PAGE REGISTRY, one checkout missing this
+# constant took all 8 pages down instead of one page. Here, in a module whose
+# only import is a leaf config, that failure mode cannot happen.
+#
+# It must stay CASE-SENSITIVE. "None" (capital N) is a real blank token;
+# "none"/"NONE" are not in the data. Matching case-insensitively would silently
+# drop sessions, and the count that comes out the other end looks confident.
+BLANK_TYPE_TOKENS = {"—", "-", "", "nan", "None"}
+
 # ── Palette ──────────────────────────────────────────────────────────────────
 C = {
     "bg":      "#0d1117",
@@ -118,4 +138,5 @@ __all__ = [
     "IF_Z2_MAX", "IF_THRESHOLD", "IF_VO2", "HOT_TEMP_C",
     "H_CARD", "H_STD", "H_PAIR", "H_HERO",
     "CHART_CONFIG", "style_figure", "ZONES", "MAIN_TYPES",
+    "BLANK_TYPE_TOKENS",
 ]

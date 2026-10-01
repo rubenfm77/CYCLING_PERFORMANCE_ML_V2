@@ -22,7 +22,16 @@ import pandas as pd
 
 from core.data import load_data, BLANK_TYPE_TOKENS
 from core.theme import MAIN_TYPES
+from core.theme import BLANK_TYPE_TOKENS as THEME_BLANK_TOKENS
 from ml import year_over_year as yoy
+
+# The whole point of the import move: core.data re-exports core.theme's set, so
+# the loader and this page are provably testing the same spellings. If someone
+# re-declares the literal in core/data.py this fails immediately, rather than
+# silently costing 4 sessions the way it did once.
+assert BLANK_TYPE_TOKENS == THEME_BLANK_TOKENS, (
+    "core.data and core.theme disagree about what counts as an unlabelled "
+    "session — that is the exact drift that counted 1043 vs 1039")
 
 df_all = load_data()
 s = yoy.prep(df_all)
