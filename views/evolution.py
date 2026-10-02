@@ -151,48 +151,63 @@ def _interval_by_day(ctx):
         metric_card("Best day", f"{iw.fmt_watts(S['w'].max())} W",
                     str(S.loc[S['w'].idxmax(), "day"].date()), "green")
     with mc[3]:
-        metric_card("Interval average",
-                    f"{iw.fmt_watts(S['w'].median())} W",
-                    "median of interval watts", "muted")
+        metric_card("Avg interval watts",
+                    f"{iw.fmt_watts(S['w'].mean())} W",
+                    "mean of interval watts across days", "muted")
+
+    # Equal-width slot per day: on a true date axis a 7-day gap gets one thin
+    # sliver and the eye can't read it. Every charted day gets the same width,
+    # in chronological order, with its date printed under the bar.
+    x_slots = [str(pd.Timestamp(d).date()) for d in S["day"]]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=S["day"], y=S["w"], name="Interval watts",
+        x=x_slots, y=S["w"], name="Interval watts",
         marker_color=C["accent"], opacity=0.9,
         text=[iw.fmt_rep(v) for v in S["secs"]],
         textposition="outside", textfont=dict(color=C["muted"], size=10),
         customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
                      iw.fmt_rep(r.dur_s)]
                     for r in S.itertuples()],
-        hovertemplate="<b>%{x|%d %b %Y}</b><br>"
+        hovertemplate="<b>%{x}</b><br>"
                       "interval %{customdata[1]} W over %{customdata[0]}<br>"
-                      "session length %{customdata[3]}<extra></extra>",
+                      "session length %{customdata[2]}<extra></extra>",
     ))
     # Line showing average interval watts across days for comparison
     if len(S) > 0:
         mean_w = float(S["w"].mean())
         fig.add_trace(go.Scatter(
-            x=S["day"], y=[mean_w] * len(S), mode="lines",
+            x=x_slots, y=[mean_w] * len(S), mode="lines",
             name="Avg interval watts",
             line=dict(color=C["yellow"], width=2, dash="dot"),
             connectgaps=False,
-            hovertemplate="<b>%{x|%d %b %Y}</b><br>"
+            hovertemplate="<b>%{x}</b><br>"
                           f"avg interval watts {iw.fmt_watts(mean_w)} W<extra></extra>",
         ))
 
     style_figure(
         fig,
         f"{tt} — interval watts by day, {cls} class"
-        "<br><sup>one bar per day, the label above it is the exact length; "
-        "the dotted line is the whole-session average for reference and is "
-        "never averaged into the bars. Where two sessions share a day the "
-        "harder one is shown. Observed history, not a cause.</sup>",
+        "<br><sup>one equal-width slot per charted day, in date order; the label "
+        "above each bar is the exact interval length. The dotted line is the "
+        "average of the interval watts across the charted days and is never "
+        "averaged into the bars. Where two sessions share a day the harder one "
+        "is shown. Observed history, not a cause.</sup>",
         H_STD,
     )
     _lane_legend(fig, [t.name for t in fig.data], min_w=430)
-    fig.update_layout(bargap=0.35)
-    fig.update_xaxes(type="date")
+    fig.update_layout(bargap=0.3)
+    fig.update_xaxes(type="category", tickangle=-45, automargin=True)
     fig.update_yaxes(tickformat=",.0f")
+    # Better scaling for small values
+    if len(S) > 0 and S["w"].max() > 0:
+        y_max = S["w"].max() * 1.25
+        y_min = S["w"].min() * 0.75  # Don't start at 0 if values are high
+        if y_min > 0:
+            y_min = max(0, y_min)
+        fig.update_yaxes(range=[y_min, y_max], autorange=False)
+    else:
+        fig.update_yaxes(rangemode="tozero")
     show(fig)
 
     st.caption(

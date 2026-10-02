@@ -387,15 +387,47 @@ def parse_measured(raw) -> list:
     return out
 
 
+# Physiology of one effort, by the user's own rule:
+#   >= 10 min  -> FTP work
+#   <  10 min  -> VO2MAX work (1-6 and 6-10 min both count as VO2MAX)
+# Sub-minute efforts are short work and fall on the VO2MAX side of the split;
+# they are never pooled with the long ones, only labelled beside them.
+FTP_MIN_S = 600
+
+
+def phys_class(secs: float) -> str:
+    """FTP for efforts of 10 minutes or more, VO2MAX below that."""
+    return "FTP" if float(secs) >= FTP_MIN_S else "VO2MAX"
+
+
+def _isolated_push_mask(out: pd.DataFrame) -> pd.Series:
+    """True for an effort over one minute that is a lone push.
+
+    The user's rule: an effort longer than a minute only counts when it is part
+    of several intervals - either several reps inside the one detected effort
+    (`n >= 2`, "3x 15m") or several efforts on the same day. A single 15-minute
+    effort alone on its day is one isolated push and is discarded.
+    """
+    big = out["secs"] > 60
+    day_n = out.groupby("date")["secs"].transform("size")
+    return big & (out["n"] < 2) & (day_n < 2)
+
+
 def measured(df: pd.DataFrame) -> pd.DataFrame:
     """One row per DETECTED EFFORT. Rep grain, not session grain.
 
     This is deliberately a different grain from prescribed(), which is session
     grain. The two are never joined: a detected effort is a thing the head unit
     saw, and a prescribed rep is a thing a human wrote down.
+
+    Two of the user's rules are applied here, before any chart sees the data:
+    an effort over one minute that is the only effort of its day (and carries
+    a single rep) is an isolated push and is discarded; every kept effort gets
+    its physiology label - FTP at ten minutes and above, VO2MAX below.
     """
+    cols = ["date", "year", "tt", "n", "secs", "cls", "phys", "w"]
     if df is None or not len(df):
-        return pd.DataFrame(columns=["year", "tt", "n", "secs", "cls", "w"])
+        return pd.DataFrame(columns=cols)
     label = (df["training_type"].astype(object)
              if "training_type" in df.columns else None)
     keep = _has_label(label) if label is not None else pd.Series(
@@ -406,13 +438,22 @@ def measured(df: pd.DataFrame) -> pd.DataFrame:
     for i in df.index[keep]:
         if src is None:
             break
+        d = df.at[i, "date"] if "date" in df.columns else None
         for n, secs, w in parse_measured(src.at[i]):
             rows.append({
-                "year": df.at[i, "date"].year if "date" in df.columns else None,
+                "date": d,
+                "year": d.year if hasattr(d, 'year') else None,
                 "tt": str(label.at[i]).strip(),
                 "n": n, "secs": secs, "cls": rep_class(secs), "w": w,
             })
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame(rows)
+    out = out[~_isolated_push_mask(out)].reset_index(drop=True)
+    out["phys"] = [phys_class(s) for s in out["secs"]]
+    out.attrs["isolated_discarded"] = int(
+        _isolated_push_mask(pd.DataFrame(rows)).sum())
+    return out
 
 
 def measured_cells(m: pd.DataFrame, year=None, min_n: int = MIN_CELL_N
@@ -443,6 +484,97 @@ def measured_cells(m: pd.DataFrame, year=None, min_n: int = MIN_CELL_N
                        for t, c, y in zip(out["tt"], out["cls"], out["year"])]
     out["drawable"] = out["n"] >= min_n
     return out.sort_values(["tt", "cls"]).reset_index(drop=True)
+
+
+# ── ley de potencias ─────────────────────────────────────────────────────────
+# Two fits of the same power-duration law, both reported side by side because
+# they answer slightly different questions and neither may hide behind the other:
+#   CP model     P = CP + W'/t   -> critical power (W) and anaerobic work
+#                                   capacity W' (kJ). Linear in 1/t: the fit is
+#                                   a least-squares line of P against 1/t, so CP
+#                                   is the intercept and W' the slope (W·s).
+#   power law    P = a · t^-b    -> the exponent b. Fit in log-log space, which
+#                                   is the only way a straight line means
+#                                   anything on a power-duration curve.
+# The input is the BEST watts observed at each duration (mean-maximal by
+# duration), never an average across durations: a power-duration law fitted to
+# averages fits nothing. n is the number of distinct durations that fed the
+# fit, and R^2 is reported for both models so neither can be oversold.
+MIN_FIT_PTS = 4
+
+
+def power_law(m: pd.DataFrame, tt: str | None = None,
+              min_pts: int = MIN_FIT_PTS) -> dict:
+    """Fit the ley de potencias to the best watts per duration.
+
+    Returns a dict with both models, each carrying its parameters, R^2 and the
+    duration range it was fitted on. `ok` is False when there are fewer than
+    `min_pts` distinct durations - a two-point line is not a law, and the
+    caller must show that instead of a fitted number.
+    """
+    empty = {"ok": False, "reason": "not enough distinct durations",
+             "n": 0, "cp": None, "w_prime_kj": None, "r2_cp": None,
+             "a": None, "b": None, "r2_law": None,
+             "t_lo": None, "t_hi": None}
+    if m is None or not len(m) or "secs" not in m.columns:
+        empty["reason"] = "no measured efforts"
+        return empty
+    s = m if tt is None else m[m["tt"] == tt]
+    if not len(s):
+        empty["reason"] = "no efforts for this type"
+        return empty
+    s = s.copy()
+    s["secs"] = pd.to_numeric(s["secs"], errors="coerce")
+    s["w"] = pd.to_numeric(s["w"], errors="coerce")
+    s = s.dropna(subset=["secs", "w"])
+    s = s[(s["secs"] > 0) & (s["w"] > 0)]
+    if not len(s):
+        empty["reason"] = "no usable efforts"
+        return empty
+    # best watts per distinct duration - the mean-maximal curve, one point each
+    best = (s.groupby("secs", as_index=False)["w"].max()
+            .sort_values("secs"))
+    t = best["secs"].to_numpy(float)
+    p = best["w"].to_numpy(float)
+    empty["n"] = int(len(best))
+    empty["t_lo"], empty["t_hi"] = int(t.min()), int(t.max())
+    if len(best) < min_pts:
+        return empty
+
+    def _r2(y, yhat):
+        ss_res = float(np.sum((y - yhat) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        if ss_tot <= 0:
+            return None
+        return 1.0 - ss_res / ss_tot
+
+    out = dict(empty)
+    # CP model: P = CP + W'/t  (linear in x = 1/t)
+    x = 1.0 / t
+    A = np.vstack([x, np.ones_like(x)]).T
+    try:
+        coef, *_ = np.linalg.lstsq(A, p, rcond=None)
+        slope, intercept = float(coef[0]), float(coef[1])
+        out["cp"] = round(intercept, 1)
+        out["w_prime_kj"] = round(slope * 1.0 / 1000.0, 1)   # W·s -> kJ
+        out["r2_cp"] = (round(_r2(p, A @ coef), 3)
+                        if _r2(p, A @ coef) is not None else None)
+    except Exception:
+        pass
+    # power law: P = a · t^-b  (linear in log-log space)
+    try:
+        lx, lp = np.log(t), np.log(p)
+        B = np.vstack([lx, np.ones_like(lx)]).T
+        coef2, *_ = np.linalg.lstsq(B, lp, rcond=None)
+        out["b"] = round(-float(coef2[0]), 3)
+        out["a"] = round(float(np.exp(coef2[1])), 1)
+        out["r2_law"] = (round(_r2(lp, B @ coef2), 3)
+                         if _r2(lp, B @ coef2) is not None else None)
+    except Exception:
+        pass
+    out["ok"] = True
+    out["reason"] = ""
+    return out
 
 
 # ── per day: the bar-and-line chart ──────────────────────────────────────────

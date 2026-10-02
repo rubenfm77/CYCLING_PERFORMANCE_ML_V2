@@ -60,6 +60,41 @@ def _rep_color(cls: str) -> str:
     return REP_COLORS.get(str(cls).strip(), C["accent"])
 
 
+def _power_law_frame(M: pd.DataFrame, tt: str):
+    """(observed bests, fitted curve) for the ley-de-potencias chart.
+
+    Observed: the best watts per distinct duration, exactly the points the fit
+    used. Curve: both fitted models evaluated on a dense grid INSIDE the fitted
+    duration range only - extending a fit past its own data is how a model
+    starts making promises nobody measured.
+    """
+    try:
+        s = M[M["tt"] == tt].copy()
+        if not len(s):
+            return None
+        s["secs"] = pd.to_numeric(s["secs"], errors="coerce")
+        s["w"] = pd.to_numeric(s["w"], errors="coerce")
+        s = s.dropna(subset=["secs", "w"])
+        s = s[(s["secs"] > 0) & (s["w"] > 0)]
+        obs = (s.groupby("secs", as_index=False)["w"].max()
+               .rename(columns={"w": "w"}).sort_values("secs"))
+        if len(obs) < iw.MIN_FIT_PTS:
+            return None
+        t_lo, t_hi = float(obs["secs"].min()), float(obs["secs"].max())
+        grid = np.linspace(t_lo, t_hi, 80)
+        pl = iw.power_law(M, tt)
+        if not pl["ok"]:
+            return None
+        curve = pd.DataFrame({
+            "secs": grid,
+            "cp": pl["cp"] + pl["w_prime_kj"] * 1000.0 / grid,
+            "law": pl["a"] * grid ** (-pl["b"]),
+        })
+        return obs, curve
+    except Exception:
+        return None
+
+
 def _cells_datable(cells: pd.DataFrame, years, label_col: str) -> pd.DataFrame:
     """Coverage grid: one row per class, one column per year, n per cell.
 
@@ -166,6 +201,96 @@ def render(head, ctx):
         _audit_tab(a, cov, P, M)
 
 
+def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
+                 phys: str | None) -> None:
+    """Ley de potencias: CP + W' and the power-law exponent, side by side.
+
+    Fitted on every effort of the type in every year - the law is the relation
+    BETWEEN durations, so filtering it to one year or one physiology would fit
+    a line to a slice of the curve. n_focus/phys describe the chart above it
+    and are only used in the wording.
+    """
+    section("\U0001F3AF Ley de potencias")
+    pl = iw.power_law(M_all, tt)
+    if not pl["ok"]:
+        callout("Not enough durations to fit the law",
+                f"{pl['reason']} ({pl['n']} distinct duration(s) of **{tt}**; "
+                f"{iw.MIN_FIT_PTS} needed). Sync more activities or widen the "
+                f"effort selection.", C["yellow"], "\U0001F6A7")
+        return
+    focus = (f"{n_focus:,} {phys} effort(s) charted above · "
+             if phys and n_focus else "")
+    st.caption(
+        f"Fitted on the BEST watts observed at each distinct duration for "
+        f"**{tt}** — every year, every effort, because the law IS the "
+        f"relation between watts and duration. "
+        f"{pl['n']} distinct durations, "
+        f"{iw.fmt_rep(pl['t_lo'])} to {iw.fmt_rep(pl['t_hi'])}."
+    )
+    pc = st.columns(5)
+    with pc[0]:
+        metric_card("CP", f"{pl['cp']:.0f} W",
+                    f"model P = CP + W′/t · R² = {pl['r2_cp']}", "accent")
+    with pc[1]:
+        metric_card("W′", f"{pl['w_prime_kj']:.1f} kJ",
+                    f"anaerobic capacity · R² = {pl['r2_cp']}", "green")
+    with pc[2]:
+        metric_card("Exponent b", f"{pl['b']:.3f}",
+                    f"P = a·t^-b, a = {pl['a']:.0f} · R² = {pl['r2_law']}",
+                    "purple")
+    with pc[3]:
+        metric_card("Durations fitted", f"{pl['n']}",
+                    f"{iw.fmt_rep(pl['t_lo'])} – {iw.fmt_rep(pl['t_hi'])}",
+                    "muted")
+    with pc[4]:
+        metric_card("n (efforts)", f"{int(len(M_all[M_all['tt'] == tt])):,}",
+                    focus + f"all years of {tt}", "yellow")
+
+    # The law itself, drawn: observed bests as points, both fits as lines.
+    fit_frame = _power_law_frame(M_all, tt)
+    if fit_frame:
+        obs, curve = fit_frame
+        fig_l = go.Figure()
+        fig_l.add_trace(go.Scatter(
+            x=obs["secs"], y=obs["w"], mode="markers",
+            name="Best observed",
+            marker=dict(size=9, color=C["accent"],
+                        line=dict(color=C["panel"], width=1)),
+            hovertemplate="%{x} s · %{y:,.0f} W<extra></extra>"))
+        fig_l.add_trace(go.Scatter(
+            x=curve["secs"], y=curve["cp"], mode="lines",
+            name=f"CP + W′/t (R²={pl['r2_cp']})",
+            line=dict(color=C["yellow"], width=2, dash="dot"),
+            hovertemplate="CP model %{y:,.0f} W<extra></extra>"))
+        fig_l.add_trace(go.Scatter(
+            x=curve["secs"], y=curve["law"], mode="lines",
+            name=f"Power law (R²={pl['r2_law']})",
+            line=dict(color=C["purple"], width=2),
+            hovertemplate="power law %{y:,.0f} W<extra></extra>"))
+        style_figure(
+            fig_l,
+            f"{tt} — ley de potencias: observed bests and both fits"
+            f"<br><sup>points are the best watts ridden at each duration; "
+            f"neither line is extended beyond the fitted range.</sup>",
+            H_STD)
+        _lane_legend(fig_l, [t.name for t in fig_l.data], min_w=430)
+        fig_l.update_xaxes(title_text="duration (s)", tickformat=",.0f")
+        fig_l.update_yaxes(tickformat=",.0f", rangemode="tozero")
+        show(fig_l)
+
+    st.markdown(
+        f"- **CP {pl['cp']:.0f} W** and **W′ {pl['w_prime_kj']:.1f} kJ** come "
+        f"from the hyperbolic fit P = CP + W′/t (R² = {pl['r2_cp']}); "
+        f"**b = {pl['b']:.3f}** from the power law P = {pl['a']:.0f}·t^−b "
+        f"(R² = {pl['r2_law']}). Both are fits to your own best efforts, "
+        f"not a test result and not a prescription.\n"
+        f"- **Descriptive only**: the law describes how your best watts fell "
+        f"with duration in this file. It makes no claim about how you would "
+        f"ride a new duration, and no claim about why the numbers are what "
+        f"they are."
+    )
+
+
 def _measured_tab(M: pd.DataFrame):
     """Real measured interval watts. One type at a time, one series per length."""
     if not len(M):
@@ -189,7 +314,7 @@ def _measured_tab(M: pd.DataFrame):
     labels = {r.tt: f"{r.tt} — {r.n:,} detected effort(s), {int(r.cls)} length class(es)"
               for r in counts.itertuples()}
 
-    c1, c2 = st.columns([2, 1])
+    c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         tt = st.selectbox("Training type", order, index=0,
                           format_func=lambda t: labels[t], key="iw_meas_type",
@@ -201,12 +326,27 @@ def _measured_tab(M: pd.DataFrame):
                           help="Only years carrying detected efforts exist here. "
                                "A year with too few efforts per cell will show its "
                                "cells as present-but-thin rather than as a line.")
+    with c3:
+        phys = st.selectbox(
+            "Effort", ["FTP", "VO2MAX"], key="iw_meas_phys",
+            help="FTP = efforts of 10 minutes and longer. VO2MAX = efforts "
+                 "below 10 minutes. The two are never on one chart. Efforts "
+                 "over one minute that stand alone on their day are already "
+                 "discarded as isolated pushes.")
+
+    # Split by physiology first: a 15-minute effort and a 3-minute effort are
+    # never on the same axis, whatever the type selector says. M_all stays
+    # unfiltered: the ley de potencias IS the relation across durations, so it
+    # is fitted on every effort of the type, in every year.
+    M_all = M
+    M = M[M["phys"] == phys] if "phys" in M.columns else M
 
     cells = iw.measured_cells(M, yr)
     mine = cells[cells["tt"] == tt].sort_values("med_w", ascending=False)
     if not len(mine):
-        callout("Nothing for this type", f"**{tt}** has no detected effort in "
-                f"{yr}.", C["orange"], "⚠️")
+        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
+                f"effort in {yr}.", C["orange"], "\U0001F6A7")
+        _law_section(M_all, tt, 0, None)
         return
 
     # Coverage first, so the reader sees the shape of the data before the chart.
@@ -223,13 +363,82 @@ def _measured_tab(M: pd.DataFrame):
                    f"and are left unplotted: "
                    + ", ".join(f"{r.cls} (n={int(r.n)})" for r in thin.itertuples()))
 
-    # ── The chart ────────────────────────────────────────────────────────────
-    section("\U0001F4C8 Measured interval watts")
+    # ── The chart: TIME on the x-axis ─────────────────────────────────────────
+    section("\U0001F4C8 Measured interval watts over time")
+    st.caption(
+        f"**{phys} efforts of {tt}, {yr}: one point per day, x-axis is the "
+        "date.** One series per rep length class; two classes never share a "
+        "number. The dotted line is the average of the charted points."
+    )
+    M_yr = M[M["year"] == yr] if yr is not None else M
+    M_tt = M_yr[M_yr["tt"] == tt]
     drawable = mine[mine["drawable"]]
+
+    if not len(M_tt):
+        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
+                f"effort in {yr}.", C["orange"], "\U0001F6A7")
+        _law_section(M_all, tt, 0, phys)
+        return
+
+    daily = (M_tt.groupby(["cls", "date"], as_index=False)
+             .agg(med_w=("w", "median"), n=("w", "size"),
+                  rep_secs=("secs", "median")))
+    daily = daily.sort_values("date")
+    fig_t = go.Figure()
+    for cls in sorted(daily["cls"].unique()):
+        dcls = daily[daily["cls"] == cls]
+        fig_t.add_trace(go.Scatter(
+            x=dcls["date"], y=dcls["med_w"], mode="lines+markers", name=cls,
+            line=dict(color=_rep_color(cls), width=2),
+            marker=dict(color=_rep_color(cls), size=9,
+                        line=dict(color=C["panel"], width=1)),
+            customdata=[[iw.fmt_watts(w), f"n = {int(n):,}",
+                         iw.fmt_rep(r)]
+                        for w, n, r in zip(dcls["med_w"], dcls["n"],
+                                           dcls["rep_secs"])],
+            connectgaps=False,
+            hovertemplate="<b>%{fullData.name}</b> · %{x|%d %b %Y}<br>"
+                          "median %{customdata[0]}<br>%{customdata[1]}<br>"
+                          "typical rep %{customdata[2]}<extra></extra>",
+        ))
+    mean_w = float(daily["med_w"].mean())
+    fig_t.add_trace(go.Scatter(
+        x=[daily["date"].min(), daily["date"].max()],
+        y=[mean_w, mean_w], mode="lines", name="Avg of charted points",
+        line=dict(color=C["yellow"], width=2, dash="dot"),
+        hovertemplate=f"avg {iw.fmt_watts(mean_w)} W<extra></extra>",
+    ))
+    style_figure(
+        fig_t,
+        f"{tt} — {phys} interval watts over time, {yr}"
+        f"<br><sup>x-axis is the date. One line per rep length class, n on every "
+        f"point; the dotted line is the average of the charted points. Observed "
+        f"history, not a cause.</sup>",
+        H_STD)
+    _lane_legend(fig_t, [t.name for t in fig_t.data], min_w=430)
+    fig_t.update_xaxes(type="date")
+    if len(daily):
+        y_max = daily["med_w"].max() * 1.25
+        y_min = daily["med_w"].min() * 0.75
+        fig_t.update_yaxes(range=[y_min, y_max], tickformat=",.0f",
+                           autorange=False)
+    else:
+        fig_t.update_yaxes(tickformat=",.0f", rangemode="tozero")
+    show(fig_t)
+
+    st.caption(
+        f"{len(daily):,} day(s), {int(daily['n'].sum()):,} detected effort(s). "
+        "Every point carries its n in the hover; the class under each line is "
+        "printed in the legend, so a 15-minute line is never read as a "
+        "3-minute one."
+    )
+
+    # ── Summary by rep length (same data, one bar per class) ─────────────────
+    section("\U0001F4CA Same data, one bar per rep length")
     if not len(drawable):
         callout("Nothing clears the floor",
                 f"No rep length class for **{tt}** in {yr} has "
-                f"{iw.MIN_CELL_N} detected efforts.", C["orange"], "⚠️")
+                f"{iw.MIN_CELL_N} detected efforts.", C["orange"], "\U0001F6A7")
     else:
         fig = go.Figure()
         custom = [[f"{iw.fmt_watts(r.med_w)} W",
@@ -251,20 +460,16 @@ def _measured_tab(M: pd.DataFrame):
         ))
         style_figure(
             fig,
-            f"{tt} — detected interval watts, {yr}, one bar per rep length"
+            f"{tt} — {phys} detected interval watts, {yr}, one bar per rep length"
             f"<br><sup>each length class is its own measure and is never averaged "
             f"with another. Median of the detected efforts, n on every bar.</sup>",
             H_STD)
         _lane_legend(fig, drawable["cls"].tolist(), min_w=430)
-        fig.update_yaxes(tickformat=",.0f")
+        fig.update_yaxes(tickformat=",.0f", rangemode="tozero")
         show(fig)
 
-        st.caption(
-            f"Median watts of the efforts {iw.MIN_CELL_N}+ long that the head unit "
-            f"detected in **{tt}** sessions in {yr}, one column per length class. "
-            f"Two classes are never merged: the 90 s–5 min column is not a diluted "
-            f"version of the under-90 s one."
-        )
+    # ── Ley de potencias ─────────────────────────────────────────────────────
+    _law_section(M_all, tt, int(len(M_tt)), phys)
 
     # ── Every cell, including the thin ones ────────────────────────────────
     section("\U0001F4CB Every cell, thinnest included")
