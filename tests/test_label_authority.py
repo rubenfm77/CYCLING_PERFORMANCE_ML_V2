@@ -90,14 +90,14 @@ check("a BILLAT session's 30 s set is BILLAT, at a 16 s recovery",
 check("the same set at a 31 s recovery is still BILLAT",
       _style(30, 20, 31, "BILLAT") == "BILLAT",
       _style(30, 20, 31, "BILLAT"))
-check("the measured rest still decides when there is NO label to defer to",
-      _style(29, 29, 16, "") == "Ronnestad-style (30 s on / 15 s off)",
+check("Ronnestad-style is merged to BILLAT (no label)",
+      _style(29, 29, 16, "") == "BILLAT",
       _style(29, 29, 16, ""))
 check("and the other way too",
       _style(30, 20, 31, "") == "Billat-style (30 s on / 30 s off)",
       _style(30, 20, 31, ""))
-check("a missing label is not the same as an empty one",
-      _style(29, 29, 16, None) == "Ronnestad-style (30 s on / 15 s off)")
+check("a missing label is treated the same as empty",
+      _style(29, 29, 16, None) == "BILLAT")
 check("the label does not overreach: an AEROBIC BASE 30 s set is not BILLAT",
       _style(30, 20, 31, "AEROBIC BASE") == "Billat-style (30 s on / 30 s off)",
       _style(30, 20, 31, "AEROBIC BASE"))
@@ -112,7 +112,7 @@ check("an 8-rep 30 s set below the 15-rep floor is not swallowed",
       and _style(32, 8, 16, "") == "micro-reps",
       f"labelled={_style(32, 8, 16, 'BILLAT')} unlabelled={_style(32, 8, 16, '')}")
 check("the call still works with no label argument at all",
-      _style(29, 29, 16) == "Ronnestad-style (30 s on / 15 s off)")
+      _style(29, 29, 16) == "BILLAT")
 check("BILLAT is registered as a family, first, and maps to itself",
       FAMILY_ORDER[0] == "BILLAT" and FAMILY_SHORT["BILLAT"] == "BILLAT",
       f"{FAMILY_ORDER[:3]}")

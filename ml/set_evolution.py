@@ -372,11 +372,13 @@ def _style(rep_secs, reps, rest, db_type=None) -> str:
         return ""
     rest = float(rest) if rest is not None and not np.isnan(rest) else np.nan
     if 24 <= rep_secs <= 40 and reps >= 8:
-        if str(db_type or "").strip() == "BILLAT":
+        # Merge Ronnestad-style into BILLAT. Keep Billat-style only when the
+        # athlete did not label it as BILLAT and rest is ~30s.
+        if db_type is not None and str(db_type).strip() == "BILLAT":
             return "BILLAT"
         if not np.isnan(rest):
             if 10 <= rest <= 22 and reps >= 15:
-                return "Ronnestad-style (30 s on / 15 s off)"
+                return "BILLAT"  # was Ronnestad-style; merge to BILLAT
             if 23 <= rest <= 45:
                 return "Billat-style (30 s on / 30 s off)"
         return "micro-reps"
