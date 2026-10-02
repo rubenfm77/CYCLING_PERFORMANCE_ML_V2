@@ -80,10 +80,11 @@ def _interval_by_day(ctx):
     df = ctx.df_all
     section("\U0001F3AF Intervals by day — watts of the interval")
     st.caption(
-        "**One bar per day: the watts of that day's interval.** The line is the "
-        "whole-session average on the same day, drawn only so the two can be "
-        "compared — it is never mixed into the bars. One training type and one "
-        "length class at a time, so two different intervals never share a bar."
+        "**One bar per day: the watts of that day's interval.** The dotted line "
+        "is the average of those interval watts across the charted days, so each "
+        "day can be compared to the average of intervals themselves. One training "
+        "type and one length class at a time, so two different intervals never "
+        "share a bar."
     )
 
     opts = iw.day_options(df)
@@ -150,10 +151,9 @@ def _interval_by_day(ctx):
         metric_card("Best day", f"{iw.fmt_watts(S['w'].max())} W",
                     str(S.loc[S['w'].idxmax(), "day"].date()), "green")
     with mc[3]:
-        metric_card("Session average",
-                    f"{iw.fmt_watts(S['avg_w'].median())} W" if has_avg else "None",
-                    "median, reference only" if has_avg else "not recorded",
-                    "muted")
+        metric_card("Interval average",
+                    f"{iw.fmt_watts(S['w'].median())} W",
+                    "median of interval watts", "muted")
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -162,26 +162,22 @@ def _interval_by_day(ctx):
         text=[iw.fmt_rep(v) for v in S["secs"]],
         textposition="outside", textfont=dict(color=C["muted"], size=10),
         customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
-                     iw.fmt_watts(r.avg_w), iw.fmt_rep(r.dur_s)]
+                     iw.fmt_rep(r.dur_s)]
                     for r in S.itertuples()],
         hovertemplate="<b>%{x|%d %b %Y}</b><br>"
                       "interval %{customdata[1]} W over %{customdata[0]}<br>"
-                      "session average %{customdata[2]} W<br>"
                       "session length %{customdata[3]}<extra></extra>",
     ))
-    # Only added when there is an average to draw. A promised line that is not
-    # on the chart is worse than no line.
-    if has_avg:
-        A = S[S["avg_w"].notna()]
+    # Line showing average interval watts across days for comparison
+    if len(S) > 0:
+        mean_w = float(S["w"].mean())
         fig.add_trace(go.Scatter(
-            x=A["day"], y=A["avg_w"], mode="lines+markers",
-            name="Session average watts",
+            x=S["day"], y=[mean_w] * len(S), mode="lines",
+            name="Avg interval watts",
             line=dict(color=C["yellow"], width=2, dash="dot"),
-            marker=dict(color=C["yellow"], size=6,
-                        line=dict(color=C["panel"], width=1)),
             connectgaps=False,
             hovertemplate="<b>%{x|%d %b %Y}</b><br>"
-                          "session average %{y:,.0f} W<extra></extra>",
+                          f"avg interval watts {iw.fmt_watts(mean_w)} W<extra></extra>",
         ))
 
     style_figure(
@@ -201,10 +197,8 @@ def _interval_by_day(ctx):
 
     st.caption(
         f"{len(S):,} day(s) of **{int(S['n_sessions'].sum()):,}** session(s). "
-        f"Each bar is one sustained interval of the {cls} class — the highest "
-        "average power sustained for that long in that session, not a "
-        "prescribed workout and not a validated test. Exact lengths are listed "
-        "below rather than left inside the chart."
+        f"Each bar is one sustained interval of the {cls} class — the average "
+        "watts of that interval. Exact lengths are listed below."
     )
 
     rows = []
@@ -213,7 +207,6 @@ def _interval_by_day(ctx):
             "Date": str(pd.Timestamp(r.day).date()),
             "Interval (W)": iw.fmt_watts(r.w),
             "Length": iw.fmt_rep(r.secs),
-            "Session average (W)": iw.fmt_watts(r.avg_w),
             "Session length": iw.fmt_rep(r.dur_s),
             "Sessions that day": int(r.n_sessions),
         })
@@ -242,9 +235,9 @@ def render(head, ctx):
         "\U0001F4C8",
         "Evolution — the intervals, then the years",
         "The first tab is the interval itself: watts of one rep, one length "
-        "class at a time, plotted by day with the session average only ever a "
-        "reference line. The second tab compares whole training types across "
-        "years. Same type, same length class, never mixed anywhere.",
+        "class at a time, plotted by day. The line shows the average interval "
+        "watts across those days. The second tab compares whole training types "
+        "across years. Same type, same length class, never mixed anywhere.",
     )
 
     # The sidebar range is NOT applied here, on purpose — see the module note.
