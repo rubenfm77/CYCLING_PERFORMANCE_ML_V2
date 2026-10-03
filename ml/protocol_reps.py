@@ -28,6 +28,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ml.set_evolution import DETECTED_SRC
 from ml.type_comparison import robust_fit
 
 MIN_TREND_SESSIONS = 3        # sessions needed before a trend line is drawn
@@ -99,6 +100,199 @@ def _set_members(iv: pd.DataFrame, sets_sel: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+BAR_COLS = ["date", "activity_id", "_gkey", "name", "seq", "rep_idx",
+            "reps_in_set", "secs", "avg_w", "np_w", "hr_avg", "intensity",
+            "cad_avg", "tsb", "temp", "src"]
+
+
+def _uncovered_sets(sel: pd.DataFrame, reps: pd.DataFrame) -> pd.DataFrame:
+    """The selected sets that own NO raw member row.
+
+    `_set_members` returns one row per raw WORK interval the detector
+    segmented, keyed by activity × group key. A set missing from it has no
+    per-interval evidence in the cache: a peak-meter reading (intervals.icu
+    reports the best held window of a ride outside its interval list), or a
+    set whose rows were pruned. Such a set used to fall out of the bars AND
+    out of the session line without a word — which is how "FTP · 20 min"
+    ended up showing one session of the four that were selected.
+    """
+    if not len(sel) or "_key" not in sel.columns:
+        return sel.iloc[0:0]
+    if reps is None or not len(reps) or "_gkey" not in reps.columns:
+        return sel                      # nothing was segmented: none covered
+    have = set(zip(reps["activity_id"].astype(str),
+                   pd.to_datetime(reps["date"]).dt.normalize(),
+                   reps["_gkey"].astype(str)))
+    want = zip(sel["activity_id"].astype(str),
+               pd.to_datetime(sel["date"]).dt.normalize(),
+               sel["_key"].astype(str))
+    return sel[np.fromiter((k not in have for k in want), dtype=bool,
+                           count=len(sel))]
+
+
+def _solo_bars(solo: pd.DataFrame) -> pd.DataFrame:
+    """One bar for each single-effort set that has no member row.
+
+    `reps == 1` means the set IS one held window: its watts and its length
+    are the measurement itself, so exactly one bar is drawn. A set of
+    several reps with no rows gives no per-interval evidence and is NOT bar
+    drawn here — one bar per rep would be an invention. Its day still rides
+    on the time line (see `_carry_sessions`).
+    """
+    empty = pd.DataFrame(columns=BAR_COLS)
+    if not len(solo):
+        return empty
+    one = solo[pd.to_numeric(solo["reps"], errors="coerce") == 1]
+    if not len(one):
+        return empty
+    w = pd.to_numeric(one["set_w"], errors="coerce")
+    s = pd.to_numeric(one["rep_secs"], errors="coerce")
+    keep = w.notna() & s.notna() & (s > 0)
+    one, w, s = one[keep], w[keep], s[keep]
+    if not len(one):
+        return empty
+    # the source travels with the set: the peak fill tags every row it adds,
+    # and a frame built without the fill has no peak row in it at all, so
+    # falling back to the detector label cannot mislabel anything
+    src = (one["Source"] if "Source" in one.columns
+           else pd.Series(DETECTED_SRC, index=one.index))
+    out = pd.DataFrame({
+        "date": pd.to_datetime(one["date"]).dt.normalize(),
+        "activity_id": one["activity_id"].astype(str),
+        "_gkey": one["_key"].astype(str),
+        "name": (one["name"].fillna("").astype(str)
+                 if "name" in one.columns else ""),
+        "seq": np.nan,
+        "rep_idx": 1,
+        "reps_in_set": 1,
+        "secs": s.to_numpy(),
+        "avg_w": w.to_numpy(),
+        "np_w": np.nan,
+        "hr_avg": np.nan,
+        "intensity": np.nan,
+        "cad_avg": np.nan,
+        "tsb": (pd.to_numeric(one["tsb"], errors="coerce").to_numpy()
+                if "tsb" in one.columns else np.nan),
+        "temp": (pd.to_numeric(one["temp"], errors="coerce").to_numpy()
+                 if "temp" in one.columns else np.nan),
+        "src": src.fillna(DETECTED_SRC).to_numpy(),
+    })
+    return out[BAR_COLS]
+
+
+def _make_bars(reps: pd.DataFrame, solo: pd.DataFrame) -> pd.DataFrame:
+    """Every interval this series can actually prove: the detector's own
+    rows plus the single-effort sets it never segmented."""
+    parts = []
+    if reps is not None and len(reps):
+        p = reps[BAR_COLS[:-1]].copy()
+        p["src"] = DETECTED_SRC          # a raw row IS the detector's cut
+        parts.append(p)
+    s = _solo_bars(solo)
+    if len(s):
+        parts.append(s)
+    if not parts:
+        return pd.DataFrame(columns=BAR_COLS)
+    bars = pd.concat(parts, ignore_index=True, sort=False)
+    bars = (bars.sort_values(["date", "activity_id", "seq"],
+                             na_position="last")
+            .reset_index(drop=True))
+    for c in ("reps_in_set", "rep_idx"):
+        bars[c] = bars[c].astype(int)
+    return bars
+
+
+def _leftover_sets(solo: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    """Uncovered sets that got no bar (several reps, or no measurable watts)."""
+    if not len(solo):
+        return solo.iloc[0:0]
+    if bars is None or not len(bars):
+        return solo
+    drawn = set(zip(bars["activity_id"].astype(str),
+                    pd.to_datetime(bars["date"]).dt.normalize(),
+                    bars["_gkey"].astype(str)))
+    want = zip(solo["activity_id"].astype(str),
+               pd.to_datetime(solo["date"]).dt.normalize(),
+               solo["_key"].astype(str))
+    return solo[np.fromiter((k not in drawn for k in want), dtype=bool,
+                            count=len(solo))]
+
+
+def _carry_sessions(sess: pd.DataFrame, left: pd.DataFrame) -> pd.DataFrame:
+    """Put the sets that gave no bar on the session line anyway.
+
+    A set of several reps whose member rows are gone contributes no
+    per-interval evidence, so it cannot be bar drawn — but dropping its DAY
+    from the time line would hide a session, which is the complaint this
+    fixes. Its own average watts are known, so the day is carried at that
+    average (weighted by rep count when the day also has real bars), and the
+    intervals it could not be split into stay blank rather than guessed.
+    One row per date, always.
+    """
+    if not len(left) or not len(sess):
+        return sess
+    out = sess.copy()
+    for c in ("w", "reps", "sets", "best", "worst", "secs_mean"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    left = left.copy()
+    left["_d"] = pd.to_datetime(left["date"]).dt.normalize()
+    out_d = pd.to_datetime(out["date"]).dt.normalize()
+    for dte, g in left.groupby("_d", sort=True):
+        gw = pd.to_numeric(g["set_w"], errors="coerce")
+        gr = pd.to_numeric(g["reps"], errors="coerce").fillna(1.0).clip(lower=1)
+        fin = gw.notna()
+        w_mean = float(gw[fin].mean()) if fin.any() else np.nan
+        rs = (pd.to_numeric(g["rep_secs"], errors="coerce").mean()
+              if "rep_secs" in g.columns else np.nan)
+        hit = out.index[out_d == dte]
+        if len(hit):
+            i = hit[0]
+            cur_w, cur_n = out.at[i, "w"], out.at[i, "reps"]
+            add_n = float(gr[fin].sum())
+            if fin.any() and np.isfinite(cur_w) and np.isfinite(cur_n) and \
+                    add_n > 0:
+                # the day's mean stays the mean of everything on it: the
+                # real bars plus these sets weighted by their rep count
+                out.at[i, "w"] = (cur_w * cur_n
+                                  + float((gw[fin] * gr[fin]).sum())) \
+                    / (cur_n + add_n)
+                out.at[i, "reps"] = cur_n + add_n
+            elif np.isfinite(w_mean):
+                out.at[i, "w"] = w_mean
+            out.at[i, "sets"] = out.at[i, "sets"] + len(g)
+            if fin.any():
+                b, wo = out.at[i, "best"], out.at[i, "worst"]
+                out.at[i, "best"] = (max(b, float(gw[fin].max()))
+                                     if np.isfinite(b)
+                                     else float(gw[fin].max()))
+                out.at[i, "worst"] = (min(wo, float(gw[fin].min()))
+                                      if np.isfinite(wo)
+                                      else float(gw[fin].min()))
+            continue
+        # a day with no bars at all: the set average is all there is, so the
+        # interval count stays blank — never invented (same rule as the
+        # no-member-rows fallback)
+        row = {c: np.nan for c in out.columns}
+        row.update({"date": dte, "reps": np.nan, "sets": float(len(g)),
+                    "w": w_mean,
+                    "best": float(gw[fin].max()) if fin.any() else np.nan,
+                    "worst": float(gw[fin].min()) if fin.any() else np.nan,
+                    "if_mean": np.nan, "if_min": np.nan, "if_max": np.nan,
+                    "open_w": np.nan, "close_w": np.nan,
+                    "secs_mean": rs,
+                    "name": (g["name"].iloc[-1] if "name" in g.columns
+                             else np.nan),
+                    "temp": (pd.to_numeric(g["temp"], errors="coerce").mean()
+                             if "temp" in g.columns else np.nan),
+                    "tsb": (pd.to_numeric(g["tsb"], errors="coerce").mean()
+                            if "tsb" in g.columns else np.nan)})
+        out = pd.concat([out, pd.DataFrame([row])], ignore_index=True,
+                        sort=False)
+    return out.sort_values("date").reset_index(drop=True)
+
+
+
 def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
                       dur_b: float) -> dict:
     """All interval-level evidence for ONE (training type × duration) series.
@@ -111,12 +305,18 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
         return {"ok": False, "reason": "No sets in that series."}
 
     reps = _set_members(iv, sel)
-    if not len(reps):
-        # raw member rows unavailable (cache pruned) — fall back to set
-        # averages so the time line still works; bars are then unavailable
-        bars = pd.DataFrame()
-        # no member rows: the SET averages are all that survive, so the
-        # interval count is genuinely unknown — blank, never invented
+    # A set that owns no raw member row — a peak-meter reading, whose single
+    # held window is not in the interval list, or a set whose rows were
+    # pruned — would fall out of BOTH the bars and the session line, which is
+    # how "FTP · 20 min" came to show one session of the four selected. Every
+    # selected set is looked for, not only the ones the detector segmented.
+    solo = _uncovered_sets(sel, reps)
+    bars = _make_bars(reps, solo)
+    if not len(bars):
+        # Nothing could be bar drawn (cache pruned, and no single-effort
+        # reading either) — fall back to the set averages so the time line
+        # still works. The SET averages are all that survive, so the interval
+        # count is genuinely unknown — blank, never invented.
         sess = (sel.groupby("date")
                 .agg(reps=("set_w", lambda c: np.nan),
                      sets=("set_w", "size"), w=("set_w", "mean"),
@@ -134,11 +334,6 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
         sess["tsb"] = sel.groupby("date")["tsb"].mean().reindex(
             sess["date"]).to_numpy()
     else:
-        bars = reps[["date", "activity_id", "_gkey", "name", "seq", "rep_idx",
-                     "reps_in_set", "secs", "avg_w", "np_w", "hr_avg",
-                     "intensity", "cad_avg", "tsb", "temp"]].copy()
-        for c in ("reps_in_set", "rep_idx"):
-            bars[c] = bars[c].astype(int)
         # per set: opening/closing windows (the within-set fade a coach
         # reads, with the ramp-affected first rep skipped), then per session
         rows = []
@@ -175,6 +370,9 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
         sess = sess.merge(
             bars.groupby("date")[["temp", "tsb"]].mean().reset_index(),
             on="date", how="left")
+        # sets that gave no bar still have a day: carry them onto the line at
+        # their own average watts, never as a second row for the same date
+        sess = _carry_sessions(sess, _leftover_sets(solo, bars))
 
     open_w = pd.to_numeric(sess["open_w"], errors="coerce")
     close_w = pd.to_numeric(sess["close_w"], errors="coerce")
@@ -190,9 +388,12 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
 
     trend = None
     fit = robust_fit(sess.rename(columns={"w": "set_w"}))
-    if fit["y_hat"] is not None:
+    # robust_fit drops rows with no watts, so its band is one value PER FITTED
+    # SESSION — with an unmeasurable day in the frame the lengths differ, and
+    # the band is left blank rather than being shifted onto the wrong dates
+    if fit["y_hat"] is not None and len(fit["y_hat"]) == len(sess):
         sess["trend"] = fit["y_hat"]
-        if fit["ci_lo"] is not None:
+        if fit["ci_lo"] is not None and len(fit["ci_lo"]) == len(sess):
             sess["trend_lo"] = fit["ci_lo"]
             sess["trend_hi"] = fit["ci_hi"]
     if len(sess):

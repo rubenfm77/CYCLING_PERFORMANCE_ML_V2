@@ -23,7 +23,8 @@ from ml.composition_intervals import run_composition
 from ml.exertion_forecast import metric_counts, run_exertion_forecast
 from ml.interval_forecast import run_band_forecast
 from ml.protocol_reps import run_protocol_view
-from ml.set_evolution import (add_signatures, build_sets, fill_peak_efforts,
+from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, add_signatures,
+                              build_sets, fill_peak_efforts,
                               quality_gates,
                               run_duration_evolution, run_set_evolution)
 from ml.type_comparison import (FAMILY_SHORT, dur_class_label, fmt_min,
@@ -494,6 +495,17 @@ def _as_int(v) -> int:
         return 0
 
 
+def _tok(v, unit: str = "", fmt: str = "{:.0f}") -> str:
+    """A hover value WITH its unit — and a dash, never a bare \"nan\", when
+    the source that reported this bar holds no such field (the peak-power
+    meter gives watts and length only)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return fmt.format(x) + unit if np.isfinite(x) else "—"
+
+
 def _rep_bar_figure(pv: dict) -> go.Figure:
     """One bar per individual interval; bars are grouped into one slot per
     session, with that session's average watts marked. No smoothing, no
@@ -514,8 +526,15 @@ def _rep_bar_figure(pv: dict) -> go.Figure:
         for j, row in enumerate(g.itertuples()):
             x.append(i + (j - (n - 1) / 2.0) * width)
             y.append(row.avg_w)
-            cd.append([d, row.rep_idx, n, row.secs, row.np_w, row.hr_avg,
-                       row.intensity, row.cad_avg, row.tsb, row.temp])
+            # pre-formatted on purpose: the peak meter has no NP, HR, IF or
+            # cadence, and a hover that printed \"nan W\" for those would be
+            # reading nothing while looking like a number
+            cd.append([d, row.rep_idx, n, _tok(row.secs, " s"),
+                       _tok(row.np_w, " W"), _tok(row.hr_avg, " bpm"),
+                       _tok(row.intensity, " %"), _tok(row.cad_avg, " rpm"),
+                       _tok(row.tsb, "", "{:+.0f}"),
+                       _tok(row.temp, " °C", "{:.1f}"),
+                       str(getattr(row, "src", DETECTED_SRC))])
     cd = np.array(cd, dtype=object)
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -526,10 +545,12 @@ def _rep_bar_figure(pv: dict) -> go.Figure:
         customdata=cd,
         hovertemplate=("%{customdata[0]|%d %b %Y} · interval "
                        "%{customdata[1]}/%{customdata[2]}<br>%{y:.0f} W · "
-                       "%{customdata[3]:.0f} s · NP %{customdata[4]:.0f} W<br>"
-                       "HR %{customdata[5]:.0f} · IF %{customdata[6]:.0f} % · "
-                       "%{customdata[7]:.0f} rpm<br>TSB %{customdata[8]:+.0f}"
-                       " · %{customdata[9]:.1f} °C<extra></extra>")))
+                       "%{customdata[3]}<br>"
+                       "NP %{customdata[4]} · HR %{customdata[5]} · "
+                       "IF %{customdata[6]}<br>"
+                       "%{customdata[7]} · TSB %{customdata[8]} · "
+                       "%{customdata[9]}<br>"
+                       "%{customdata[10]}<extra></extra>")))
     # The session average has to be unmistakable. A bare 14 px marker lost in a
     # row of 138 thin bars reads as "just another bar top", and with no number
     # attached there was nothing to read off the chart at all. So each session
@@ -672,6 +693,10 @@ def _rep_table(bars: pd.DataFrame) -> pd.DataFrame:
         "Cad": bars["cad_avg"].round(0),
         "°C": bars["temp"].round(1),
         "TSB": bars["tsb"].round(1),
+        # which instrument reported this interval — the detector's own row,
+        # or the peak meter's held window where the detector cut the effort
+        "Source": (bars["src"].fillna(DETECTED_SRC)
+                   if "src" in bars.columns else DETECTED_SRC),
         "Ride": bars["name"].fillna("").astype(str),
     })
     return out.iloc[::-1]
@@ -876,10 +901,18 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                     accent=C["green"])
     with kc[4]:
         fade = tr.get("fade_med", np.nan)
-        multi_rep = stt.get("reps_med", 1) >= 2
+        # A fade exists only where a session actually holds several reps. The
+        # series median of the rep counts can say "1" while one session of the
+        # four is a three-rep block — and then a fade number would sit over
+        # the words "nothing to fade between". Count the sessions that have
+        # one, instead of guessing from the median.
+        n_fade = (int(sess["fade_%"].notna().sum())
+                  if "fade_%" in sess.columns else 0)
+        multi_rep = n_fade > 0
         metric_card("Fade inside sessions",
                     f"{fade:+.1f} %" if not np.isnan(fade) else "—",
-                    foot=("closing (last 2 reps) vs opening (reps 2–3)"
+                    foot=(f"closing (last 2 reps) vs opening (reps 2–3) · "
+                          f"{n_fade} of {len(sess)} sessions have both"
                           if multi_rep else
                           "single efforts — one rep, nothing to fade between"),
                     tone="good" if (not np.isnan(fade) and fade <= 2)
@@ -888,14 +921,22 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
 
     # 4a — every individual interval, one bar each, grouped per session
     if len(bars):
+        # which instrument reported each bar, stated before the chart uses it
+        n_meter = (int((bars["src"] == PEAK_SRC).sum())
+                   if "src" in bars.columns else 0)
         st.markdown(f"**Every interval of every session — {pv['n_reps']} "
                     f"bars, nothing smoothed. The orange dotted line across "
                     f"each day is that session's AVERAGE watts; ◇ marks it "
                     f"and prints the number.** "
-                    + ("Rep 1 of each block still carries the power ramp, so "
-                       "the fade above compares the opening reps 2–3 with "
-                       "the closing two:"
-                       if stt.get("reps_med", 1) >= 2 else
+                    + (f"{n_meter} of these bars are the peak-power meter's "
+                       f"held window — one effort with no NP, HR, IF or "
+                       f"cadence in that source; hover the bar or read the "
+                       f"Source column to see which instrument reported it. "
+                       if n_meter else "")
+                    + ("Where a session holds several reps, rep 1 still "
+                       "carries the power ramp, so the fade above compares "
+                       "the opening reps 2–3 with the closing two:"
+                       if multi_rep else
                        "These are single efforts, so there is no within-set "
                        "fade to read — the dotted line is just that day's "
                        "effort:"))
