@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 from core.components import callout, legend, metric_card, page_header, section, show
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, H_CARD, H_HERO, H_PAIR, H_STD,
                         STATE_COLORS, SURGERY, WEIGHT_KG, style_figure)
+from ml import interval_watts as iw
 from views.interval_watts import fitness_section
 
 
@@ -96,21 +97,37 @@ def render(head, ctx):
 
     # ── Power curve & best efforts ─────────────────────────────────────────
     section("⚡ Power curve & best efforts")
+    # Source order: the mean-maximal CSV if some pipeline actually produced it,
+    # otherwise the curve computed from the file itself. The CSV was never
+    # reachable on a deploy (nothing in this repo writes it), so the old code
+    # showed "run python src/intervals_api.py" — a script that does not exist.
     pc_df = pd.DataFrame()
+    pc_src = None
     if Path("data/power_curve.csv").exists():
         try:
-            pc_df = pd.read_csv("data/power_curve.csv")
+            _csv = pd.read_csv("data/power_curve.csv")
+            if {"watts", "secs", "duration"}.issubset(_csv.columns):
+                pc_df, pc_src = _csv, "csv"
         except Exception:
             pc_df = pd.DataFrame()
 
     if pc_df.empty or "watts" not in pc_df.columns:
+        pc_df = iw.power_curve(df_all)
+        pc_src = "file" if len(pc_df) else None
+
+    if pc_src is None or pc_df.empty:
         callout("Power curve unavailable",
-                "Run `python src/intervals_api.py` to fetch mean-maximal power "
-                "from Intervals.icu, then click 🔄 Refresh data.",
+                "No detected effort in your file carries both a duration and a "
+                "watt figure, so there is nothing to plot. This curve is built "
+                "from the efforts already in your training data — no separate "
+                "download is needed.",
                 C["accent"], icon="ℹ️")
     else:
         pc_df = pc_df.sort_values("secs").reset_index(drop=True)
+        if "date" in pc_df.columns:
+            pc_df["date"] = pd.to_datetime(pc_df["date"], errors="coerce")
         pc_df["wkg"] = pc_df["watts"] / WEIGHT_KG   # one weight value, from theme
+        _hover_ok = {"date", "n", "duration"}.issubset(pc_df.columns)
         cc = st.columns(2)
         with cc[0]:
             fig_pc = go.Figure(go.Scatter(
@@ -120,7 +137,14 @@ def render(head, ctx):
                 text=[""] + [f"{w:.0f} W" for w in pc_df["watts"].iloc[1:]],
                 textposition=["top center" if i % 2 == 0 else "bottom center"
                               for i in range(len(pc_df))],
-                name="Best power (W)"))
+                name="Best power (W)",
+                customdata=(pc_df[["duration", "n", "date"]].astype(object).values
+                            if _hover_ok else None),
+                hovertemplate=(
+                    "duration <b>%{customdata[0]}</b><br>"
+                    "%{customdata[1]} effort(s) in the window<br>"
+                    "best on %{customdata[2]|%d %b %Y}<extra>power curve</extra>"
+                ) if _hover_ok else None))
             fig_pc.add_hline(y=FTP_CURRENT, line_dash="dot", line_color=C["yellow"])
             fig_pc.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.4)
             fig_pc.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
@@ -156,6 +180,28 @@ def render(head, ctx):
             style_figure(fig_wkg, f"W/kg at each duration — {WEIGHT_KG:.0f} kg climber", H_PAIR)
             legend(fig_wkg, "right")
             show(fig_wkg)
+
+        if pc_src == "file":
+            # Disclose exactly where every point came from — no silent sourcing.
+            M_pc = iw.measured(df_all)
+            dcol = pd.to_datetime(pc_df["date"], errors="coerce").dropna()
+            span = (f"{dcol.min():%d %b %Y} → {dcol.max():%d %b %Y}"
+                    if len(dcol) else "—")
+            st.caption(
+                f"**Source: your own training file.** {len(pc_df)} durations, each "
+                f"the best effort within ±12% of that length, chosen from "
+                f"{len(M_pc):,} detected efforts ({span}); the date and the number "
+                f"of efforts behind every point are on the hover. Nothing is "
+                f"interpolated between points and nothing is extrapolated past the "
+                f"longest effort you have ridden — a duration you never held inside "
+                f"the window is simply not drawn."
+            )
+        elif pc_src == "csv":
+            st.caption(
+                "**Source: `data/power_curve.csv`** — a mean-maximal export "
+                "already sitting in your data folder. Every point is read from "
+                "that file as it is; nothing on this chart is recomputed."
+            )
 
     # ── Interval watts over time + power-duration law ─────────────────────
     # Full history (df_all), not the sidebar range: the sidebar defaults to

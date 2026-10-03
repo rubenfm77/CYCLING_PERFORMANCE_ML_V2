@@ -499,7 +499,6 @@ def _measured_tab(M: pd.DataFrame):
     )
     M_yr = M[M["year"] == yr] if yr is not None else M
     M_tt = M_yr[M_yr["tt"] == tt]
-    drawable = mine[mine["drawable"]]
 
     if not len(M_tt):
         callout("Nothing for this type", f"**{tt}** has no {phys} detected "
@@ -520,40 +519,63 @@ def _measured_tab(M: pd.DataFrame):
         "3-minute one."
     )
 
-    # ── Summary by rep length (same data, one bar per class) ─────────────────
-    section("\U0001F4CA Same data, one bar per rep length")
-    if not len(drawable):
-        callout("Nothing clears the floor",
-                f"No rep length class for **{tt}** in {yr} has "
-                f"{iw.MIN_CELL_N} detected efforts.", C["orange"], "\U0001F6A7")
+    # ── The same data as bars, DATE on the x-axis ────────────────────────────
+    # Literally the same rows as the line chart above (same physiology, same
+    # year, same type) — "Same data" has to be true. What changes is the axis:
+    # the date, not the length class. One bar per DAY, coloured by rep length
+    # class, so two classes on the same day stand side by side and never share
+    # a number. If no year is selected, every year in the file is drawn.
+    section("\U0001F4CA Same data, one bar per day")
+    M_bars = M_tt
+    bars = (M_bars.groupby(["date", "cls"], as_index=False)
+            .agg(med_w=("w", "median"), n=("w", "size"),
+                 rep_secs=("secs", "median"))
+            .sort_values(["date", "cls"]))
+    if not len(bars):
+        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
+                f"effort in {yr}.", C["orange"], "\U0001F6A7")
     else:
+        classes = sorted(bars["cls"].unique())
         fig = go.Figure()
-        custom = [[f"{iw.fmt_watts(r.med_w)} W",
-                   f"n = {int(r.n):,} effort(s)",
-                   f"middle half: {iw.fmt_watts(r.q1_w)}–{iw.fmt_watts(r.q3_w)} W",
-                   f"typical length {iw.fmt_rep(r.rep_secs)}"]
-                  for r in drawable.itertuples()]
-        fig.add_trace(go.Bar(
-            x=drawable["cls"], y=drawable["med_w"], name=tt,
-            marker_color=[_rep_color(c) for c in drawable["cls"]],
-            opacity=0.88,
-            text=[f"{iw.fmt_watts(m)} W\nn={int(n):,}"
-                  for m, n in zip(drawable["med_w"], drawable["n"])],
-            textposition="outside", textfont=dict(color=C["muted"], size=10),
-            customdata=custom,
-            hovertemplate="<b>%{x}</b> · " + tt + "<br>"
-                          "median %{customdata[0]}<br>%{customdata[1]}<br>"
-                          "%{customdata[2]}<br>%{customdata[3]}<extra></extra>",
-        ))
+        for cls in classes:
+            d = bars[bars["cls"] == cls]
+            fig.add_trace(go.Bar(
+                x=d["date"], y=d["med_w"], name=cls,
+                marker_color=_rep_color(cls), opacity=0.88,
+                text=[f"{iw.fmt_watts(w)} W\nn={int(n):,}"
+                      for w, n in zip(d["med_w"], d["n"])],
+                textposition="outside", textfont=dict(color=C["muted"], size=9),
+                customdata=[[f"{iw.fmt_watts(w)} W", f"n = {int(n):,} effort(s)",
+                             iw.fmt_rep(r)]
+                            for w, n, r in zip(d["med_w"], d["n"],
+                                               d["rep_secs"])],
+                hovertemplate="<b>%{fullData.name}</b> · %{x|%d %b %Y}<br>"
+                              "median %{customdata[0]}<br>%{customdata[1]}<br>"
+                              "typical rep %{customdata[2]}<extra></extra>",
+            ))
         style_figure(
             fig,
-            f"{tt} — {phys} detected interval watts, {yr}, one bar per rep length"
-            f"<br><sup>each length class is its own measure and is never averaged "
-            f"with another. Median of the detected efforts, n on every bar.</sup>",
+            f"{tt} — {phys} detected interval watts, one bar per day, "
+            f"{bars['date'].min():%d %b %Y} → {bars['date'].max():%d %b %Y}"
+            f"<br><sup>x-axis is the date. One bar per day, split by rep length "
+            f"class, n on every bar; a day with no effort is left empty rather "
+            f"than drawn as zero watts.</sup>",
             H_STD)
-        _lane_legend(fig, drawable["cls"].tolist(), min_w=430)
+        _lane_legend(fig, classes, min_w=430)
+        fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.10)
+        fig.update_xaxes(type="date")
         fig.update_yaxes(tickformat=",.0f", rangemode="tozero")
         show(fig)
+
+        st.caption(
+            f"{bars['date'].nunique():,} day(s) with at least one {phys} effort "
+            f"of {tt}, {int(bars['n'].sum()):,} effort(s), "
+            f"{bars['date'].min():%d %b %Y} → {bars['date'].max():%d %b %Y} "
+            "— the same rows as the chart above, read by day instead of by "
+            "line. Bars are grouped, not stacked: classes on the same day sit "
+            "side by side and each keeps its own n, and a day without an effort "
+            "is left empty rather than drawn as zero watts."
+        )
 
     # ── Power-duration law ──────────────────────────────────────────────────
     _law_section(M_all, tt, int(len(M_tt)), phys)

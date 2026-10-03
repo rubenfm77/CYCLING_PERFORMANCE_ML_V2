@@ -464,7 +464,7 @@ def _render_reconcile(df_all) -> None:
             f"{derived:.0f} W" if derived else "no curve",
             foot=(f"from {pc20:.1f} W best · curve fetched "
                   f"{pc_fetched:%d %b %Y}" if derived
-                  else "refresh: python src/intervals_api.py"),
+                  else "no 20-min best in the file yet"),
             accent=C["yellow"])
     with cc[1]:
         metric_card(

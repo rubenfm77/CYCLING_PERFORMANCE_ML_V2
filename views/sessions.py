@@ -119,5 +119,5 @@ def render(head, ctx):
 - FTP 235/240 and weight 56.8/57.0 mismatches reconciled to single values in `core/theme.py`.
 - Empty states are explicit (HRV, power curve) instead of silently blank charts.
         """)
-    st.caption("*Run `python src/intervals_api.py` to fetch the latest data · "
-               "then click 🔄 Refresh data*")
+    st.caption("*Everything here is read from your synced training file · "
+               "click 🔄 Refresh data to clear the cache and re-sync it*")

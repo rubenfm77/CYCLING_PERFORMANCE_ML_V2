@@ -732,6 +732,69 @@ def day_options(df: pd.DataFrame) -> pd.DataFrame:
         drop=True)
 
 
+# ── the power curve, built from the file ─────────────────────────────────────
+# Canonical durations of a power-duration curve. A target with no effort inside
+# its window is SKIPPED, never interpolated: a gap the athlete never filled is a
+# gap on the chart.
+PC_TARGETS = (5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 420, 600, 780, 900,
+              1200, 1800, 2400, 3000)
+PC_WINDOW = 0.12                     # ±12 % around the target duration
+
+
+def power_curve(df: pd.DataFrame, window: float = PC_WINDOW
+                ) -> pd.DataFrame:
+    """Best observed watts near each canonical duration — the power curve.
+
+    Built from what is already in the training file, so it works with no API
+    call, no credentials and no `data/power_curve.csv`: that file is produced
+    by a script which does not exist in this repo, which is why the chart used
+    to render as "unavailable" on every deploy.
+
+    One REAL effort stands behind every point: the best watts among the
+    detected efforts whose length sits within `window` of the target. The
+    exact length, the date, and how many efforts fell inside the window travel
+    with the row so the chart can print them. Nothing is interpolated between
+    points and nothing is extrapolated past the longest effort ridden — the
+    smooth curve across all durations is the power-duration law FIT, and that
+    one is labelled as a fit where it is drawn.
+    """
+    cols = ["secs", "watts", "duration", "target", "n", "date", "year"]
+    M = measured(df)
+    if M is None or not len(M):
+        return pd.DataFrame(columns=cols)
+    M = M.dropna(subset=["secs", "w"]).copy()
+    M["w"] = pd.to_numeric(M["w"], errors="coerce")
+    M = M[M["w"] > 0]
+    if not len(M):
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for target in PC_TARGETS:
+        lo, hi = target * (1.0 - window), target * (1.0 + window)
+        c = M[(M["secs"] >= lo) & (M["secs"] <= hi)]
+        if not len(c):
+            continue
+        best = c.loc[c["w"].idxmax()]
+        rows.append({
+            "secs": int(round(float(best["secs"]))),
+            "watts": float(best["w"]),
+            "duration": fmt_rep(float(best["secs"])),
+            "target": int(target),
+            "n": int(len(c)),
+            "date": best["date"],
+            "year": int(best["year"]) if pd.notna(best["year"]) else None,
+        })
+    out = pd.DataFrame(rows, columns=cols)
+    if len(out):
+        # Two targets can land on the same exact length (±12 % windows touch at
+        # the edges). A repeated tick position makes the axis ambiguous, so the
+        # point with more efforts behind it wins.
+        out = (out.sort_values(["secs", "n"], ascending=[True, False])
+               .drop_duplicates("secs").sort_values("secs")
+               .reset_index(drop=True))
+    return out
+
+
 # ── honesty surfaces ─────────────────────────────────────────────────────────
 def audit(df: pd.DataFrame) -> dict:
     """What the prescription parser saw, kept, and dropped. Never a bare rate.

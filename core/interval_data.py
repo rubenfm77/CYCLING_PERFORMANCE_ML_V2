@@ -4,8 +4,8 @@
 # and caches them incrementally on disk, so the Intervals page renders in
 # milliseconds after the first sync.
 #
-# Endpoints (read-only GETs, Basic API-key auth — same scheme as
-# src/intervals_api.py, credentials via core.data._get_api_credentials):
+# Endpoints (read-only GETs, Basic API-key auth — credentials come from
+# core.data._get_api_credentials, the same store every other API call uses):
 #
 #   GET /api/v1/athlete/{id}/activities?oldest=&newest=&limit=
 #       session rows; `interval_summary` non-empty marks activities that
