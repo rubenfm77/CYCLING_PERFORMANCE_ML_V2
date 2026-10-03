@@ -799,16 +799,47 @@ def _prescribed_tab(P: pd.DataFrame):
 
 def _audit_tab(a: dict, cov: dict, P: pd.DataFrame, M: pd.DataFrame):
     section("\U0001F9EA What the parser could and could not read")
+
+    # The note window comes FIRST: this file's coach notes stop on their own,
+    # and a reader has to see that before an empty recent cell is read as a
+    # parse failure. It is neither.
+    if a.get("note_last") is not None:
+        st.markdown(
+            f"**Coach notes run {a['note_first']:%d %b %Y} → "
+            f"{a['note_last']:%d %b %Y}.** After that date "
+            f"**{a['rides_after_last_note']:,}** session(s) carry no note at "
+            "all, so there is nothing there to read — a blank cell in those "
+            "years is absent data, not a refusal."
+        )
+
     st.markdown(
         f"Of **{a['seen']:,}** coach descriptions in this file:\n\n"
-        f"- **{a['parsed']:,}** gave an unambiguous interval target and are used.\n"
+        f"- **{a['parsed']:,}** gave an unambiguous interval target and are used "
+        f"({a['reads_direct']:,} written straight after the rep, "
+        f"{a['reads_inside']:,} read off a sub-length inside the rep, "
+        f"{a['reads_ceiling']:,} written as a ceiling such as `per sota 265w` "
+        f"and charted at that ceiling rather than invented).\n"
         f"- **{a['skipped_steady']:,}** carry no repetition at all — a steady "
         f"endurance ride, which has no intervals by definition. That is a correct "
         f"non-match, not a loss.\n"
-        f"- **{a['skipped_unread']:,}** do contain a repetition but no readable "
-        f"wattage beside it, so they are refused rather than guessed.\n"
+        f"- **{a['skipped_unread']:,}** do contain a repetition and still gave "
+        f"nothing usable. They are split below, because 'refused' hides three "
+        f"different facts.\n"
         f"- **{a['skipped_unlabelled']:,}** parsed but sit on a session with no "
         f"training type, so they cannot be attributed to a type."
+    )
+
+    st.markdown(
+        f"- **{a['refused_no_watts']:,}** have a repetition but no wattage "
+        "beside it: the target is in pedal strokes (`+165pols`), in a speed "
+        "(`10k/h`), or is simply `MÀX`. Refused rather than guessed.\n"
+        f"- **{a['refused_too_short']:,}** do have a wattage, but the rep is "
+        f"under the 30-second interval floor (10 s and 15 s sprints). That is a "
+        "stated rule, not a parser failure — the watts are there and readable.\n"
+        f"- **{a['refused_implausible']:,}** have a wattage under 100 W, which "
+        "no interval of this athlete's has ever been.\n"
+        f"- **{a['refused_ambiguous']:,}** have wattage that would have to be "
+        "attributed to a rep by guessing at the structure."
     )
 
     if a.get("examples_unread"):
@@ -817,10 +848,9 @@ def _audit_tab(a: dict, cov: dict, P: pd.DataFrame, M: pd.DataFrame):
         for ex in a["examples_unread"]:
             st.code(ex, language=None)
         st.caption(
-            "Common reasons: the target is given in pedal strokes rather than "
-            "watts (`pols`), or in a speed (`10k/h`) rather than a power, or the "
-            "structure is compound (`3x15' (30\" +330w +14' 250w +30\" +330w)`) "
-            "where several efforts share one rep. Reading a number out of those "
+            "The reason each one is refused is counted above: no wattage, "
+            "under the 30-second floor, or a structure that could not be "
+            "attributed without invention. Reading a number out of any of them "
             "would be invention."
         )
 
@@ -860,6 +890,13 @@ def _audit_tab(a: dict, cov: dict, P: pd.DataFrame, M: pd.DataFrame):
             f"instructed — the end the coach was willing to call a success. The "
             f"upper end is carried alongside and shown in the hover rather than "
             f"discarded.\n"
+            f"- **Where a number came from is counted, never assumed.** A target "
+            f"written straight after the rep is read directly. A target written "
+            f"on a sub-length inside the rep (`2x20' terreny constant "
+            f"(4'265-280w+1' suau x4 cops)`) is read from that sub-length, and "
+            f"only when the sub-length fits inside the rep. A ceiling (`per "
+            f"sota 265w`, `sense passar 200w`) is charted at the ceiling and "
+            f"said to be one. Everything else is refused.\n"
             f"- **Minutes and seconds are different marks.** In these comments "
             f"`15'` is fifteen minutes and `30\"` is thirty seconds. Reading the "
             f"second as the first would inflate a sprint session sixtyfold.\n"

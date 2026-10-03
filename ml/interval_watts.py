@@ -105,18 +105,44 @@ _MIN_UNIT = r"(?:'|’|´|min)"
 _SEC_QUOTE = r"(?:\"|”|″)"
 _SEC_WORD = r"(?:s|s'|seg)"
 
-PRESCRIBED_RE = re.compile(
-    r"(?P<n>\d{1,2})\s*[x*]\s*"
-    r"(?:(?P<mins>\d{1,3})\s*" + _MIN_UNIT + r""
+# ── reading a rep out of the coach's sentence ─────────────────────────────────
+# A rep marker: "2x20'", '8x30"', "4x45s", "4x1'30"". The mixed minute-second
+# form comes FIRST in the alternation so 1'30" is read as ninety seconds and
+# not as one minute plus a stray 30".
+REPMARK_RE = re.compile(
+    r"(?P<n>\d{1,2})\s*[x*×]\s*"
+    r"(?:(?P<mmin>\d{1,3})\s*" + _MIN_UNIT + r"\s*(?P<msec>\d{1,2})\s*"
+    + _SEC_QUOTE + r""
+    r"|(?P<mins>\d{1,3})\s*" + _MIN_UNIT + r""
     r"|(?P<qsec>\d{1,3})\s*" + _SEC_QUOTE + r""
-    r"|(?P<sec>\d{1,2})\s*" + _SEC_WORD + r")"
-    # The gap between the rep length and the wattage may contain words but NOT
-    # digits. That is what stops a rep from borrowing a recovery effort's watts
-    # and vice versa: "3x15' (10' recup -150w)" cannot match, because crossing
-    # the "10" would require a digit in the gap.
-    r"[^0-9]{0,40}?"
-    r"(?:entre\s+|a\s+|target\s+)?"
-    r"(?P<w1>\d{2,4})\s*(?:-\s*(?P<w2>\d{2,4})\s*)?w\b",
+    r"|(?P<sec>\d{1,2})\s*" + _SEC_WORD + r")",
+    re.IGNORECASE)
+
+# Everything after one of these is recovery, warm-up or the rest of the ride,
+# so the window in which a rep's target wattage may be searched ENDS here —
+# rather than trying to reject individual watt figures afterwards. "3x30" MAX
+# amb 4'30" recup entre intervals. Completar fins 4h entre 155-165w" must never
+# let a 30-second rep borrow the endurance pace written a sentence later, and
+# "4x15' pujada (10' recup -150w)" must never lend its watts to the rep.
+_CUE_RE = re.compile(
+    r"recup|recuperaci|repos|descans|\btornada\b|completar|cool\s?down|"
+    r"\bcd\b|\bmd\b|\(\s*\d{1,3}\s*['\"]?\s*r\s*\)",
+    re.IGNORECASE)
+
+# A wattage in the coach's own notation: "265-280w", "300w", "+700W". Cadence
+# ("105-110rpm"), pulse ("155-165pols") and speed ("10k/h") carry no trailing
+# w, so none of them can match — that is the whole reason for the suffix.
+_WATT_RE = re.compile(r"(?P<w1>\d{2,4})\s*(?:-\s*(?P<w2>\d{2,4})\s*)?w\b",
+                      re.IGNORECASE)
+
+# A length written INSIDE the window: 4', 30", 1'30". It says which sub-block
+# of a rep a wattage belongs to, which is how "2x20' ... (4'265-280w+1' suau x4
+# cops)" is read as a 20-minute target instead of being refused.
+_DUR_RE = re.compile(
+    r"(?:(?P<mm>\d{1,3})\s*" + _MIN_UNIT + r"\s*(?P<mss>\d{1,2})\s*"
+    + _SEC_QUOTE + r""
+    r"|(?P<m>\d{1,3})\s*" + _MIN_UNIT + r""
+    r"|(?P<s>\d{1,3})\s*" + _SEC_QUOTE + r")",
     re.IGNORECASE)
 
 MEASURED_RE = re.compile(
@@ -207,6 +233,129 @@ def main_set(desc) -> str:
     return d.strip()
 
 
+def _dur_secs(m) -> int:
+    """Seconds for one length token: 1'30" -> 90, 4' -> 240, 30" -> 30."""
+    if m.group("mm"):
+        return int(m.group("mm")) * 60 + int(m.group("mss"))
+    if m.group("m"):
+        return int(m.group("m")) * 60
+    if m.group("s"):
+        return int(m.group("s"))
+    return 0
+
+
+def _rep_secs(m):
+    """Seconds for the rep marker itself, or None if the form is unreadable."""
+    if m.group("mmin"):
+        return int(m.group("mmin")) * 60 + int(m.group("msec"))
+    if m.group("mins"):
+        return int(m.group("mins")) * 60
+    if m.group("qsec"):
+        return int(m.group("qsec"))
+    if m.group("sec"):
+        return int(m.group("sec"))
+    return None
+
+
+def _window(text: str, m, nxt) -> str:
+    """Text this rep may claim: up to the next rep marker, then to the first
+    recovery or rest-of-ride cue. Nothing outside the window is ever read."""
+    seg = text[m.end(): nxt.start() if nxt is not None else len(text)]
+    cue = _CUE_RE.search(seg)
+    return seg[:cue.start()] if cue else seg
+
+
+# A wattage written as a CEILING rather than a target: "per sota 265w",
+# "sense passar 200w", "sense superar els 210w" — all Catalan for "below /
+# without passing / without exceeding". Those numbers are real and are the
+# coach's own mark, but they are a top edge, so they are tagged and reported
+# as ceilings instead of being presented as an exact target.
+_CEIL_RE = re.compile(
+    r"per sota|\bsota\b|sense passar|sense sobrepassar|sense superar|"
+    r"menys de|no passar|\bmàxim\b|\bmaxim\b", re.IGNORECASE)
+
+
+def _is_ceiling(seg: str, pos: int) -> bool:
+    return bool(_CEIL_RE.search(seg[max(0, pos - 40):pos]))
+
+
+def _target_for(seg: str, rep_secs: int):
+    """(status, lo, hi, basis, ceiling) — which wattage belongs to this rep.
+
+    direct : the coach wrote the wattage straight after the rep.
+    inside : the rep is a block and the wattage sits on one of its sub-lengths,
+             so the sub-length closest to (and never longer than) the rep wins.
+    Refused, never guessed, when there is no wattage (a cadence, a pulse or an
+    all-out set) or when the only candidates are structures this parser does
+    not understand.
+    """
+    atoms = []
+    for a in _WATT_RE.finditer(seg):
+        lo, hi = float(a.group("w1")), float(a.group("w2") or a.group("w1"))
+        if hi < lo:
+            lo, hi = hi, lo
+        durs = [_dur_secs(d) for d in _DUR_RE.finditer(seg[:a.start()])]
+        atoms.append({"lo": lo, "hi": hi,
+                      "dur": durs[-1] if durs else None,
+                      "pos": a.start()})
+    if not atoms:
+        return "no_watts", None, None, None, False
+    bare = [a for a in atoms if a["dur"] is None]
+    if bare:
+        a = bare[0]
+        return "ok", a["lo"], a["hi"], "direct", _is_ceiling(seg, a["pos"])
+    # A block LONGER than the rep cannot be part of this rep, which means the
+    # window spans more than the rep does and nothing inside it can be
+    # attributed safely. Refuse rather than choose between them.
+    if any(a["dur"] and a["dur"] > rep_secs for a in atoms):
+        return "ambiguous", None, None, None, False
+    inside = [a for a in atoms
+              if a["dur"] is not None and 0 < a["dur"] <= rep_secs]
+    if not inside:
+        return "ambiguous", None, None, None, False
+    best = min(inside, key=lambda a: max(a["dur"] / rep_secs,
+                                         rep_secs / a["dur"]))
+    ratio = max(best["dur"] / rep_secs, rep_secs / best["dur"])
+    # One wattage written inside the block IS that rep's target even when its
+    # sub-length is short (4' inside a 20-minute rep). Several candidates that
+    # are all far from the rep length are a structure we do not understand, and
+    # those are refused rather than guessed.
+    if ratio <= 2.5 or len(inside) == 1:
+        return ("ok", best["lo"], best["hi"], "inside",
+                _is_ceiling(seg, best["pos"]))
+    return "ambiguous", None, None, None, False
+
+
+def _outcomes(desc) -> list:
+    """One dict per rep marker, so a refusal keeps its reason.
+
+    status: ok | no_watts | ambiguous | too_short | implausible
+    """
+    if _blank(desc):
+        return []
+    text = main_set(desc)
+    marks = list(REPMARK_RE.finditer(text))
+    out = []
+    for i, m in enumerate(marks):
+        secs = _rep_secs(m)
+        if not secs:
+            out.append({"status": "ambiguous"})
+            continue
+        seg = _window(text, m, marks[i + 1] if i + 1 < len(marks) else None)
+        status, lo, hi, basis, ceil = _target_for(seg, secs)
+        if status != "ok":
+            out.append({"status": status})
+        elif secs < 30:
+            out.append({"status": "too_short", "secs": secs, "lo": lo})
+        elif lo < 100:
+            out.append({"status": "implausible", "secs": secs, "lo": lo})
+        else:
+            out.append({"status": "ok", "n": int(m.group("n")), "secs": secs,
+                        "lo": lo, "hi": hi, "basis": basis,
+                        "ceiling": bool(ceil)})
+    return out
+
+
 def parse_prescribed(desc) -> list:
     """All 'NxD' reps with a goal wattage in one description.
 
@@ -214,25 +363,8 @@ def parse_prescribed(desc) -> list:
     "nothing unambiguous here", which is a normal outcome and is counted by
     audit() rather than hidden.
     """
-    if _blank(desc):
-        return []
-    out = []
-    for m in PRESCRIBED_RE.finditer(main_set(desc)):
-        if m.group("mins"):
-            secs = int(m.group("mins")) * 60
-        elif m.group("qsec"):
-            secs = int(m.group("qsec"))
-        elif m.group("sec"):
-            secs = int(m.group("sec"))
-        else:
-            continue
-        lo = float(m.group("w1"))
-        hi = float(m.group("w2")) if m.group("w2") else lo
-        if hi < lo:
-            lo, hi = hi, lo
-        if secs >= 30 and lo >= 100:
-            out.append((int(m.group("n")), secs, lo, hi))
-    return out
+    return [(o["n"], o["secs"], o["lo"], o["hi"])
+            for o in _outcomes(desc) if o["status"] == "ok"]
 
 
 def prescribed(df: pd.DataFrame) -> pd.DataFrame:
@@ -804,10 +936,25 @@ def audit(df: pd.DataFrame) -> dict:
     intervals by definition, which is a correct non-match and not a loss.
     Reporting one combined number would make a healthy parser look like it lost
     60% of the file.
+
+    `skipped_unread` is then SPLIT, because "refused" hides three very
+    different facts: no wattage was written (a pulse or an all-out set), the
+    wattage is there but the rep is under the 30 s interval floor, or the
+    wattage could not be attributed to this rep. The three add up to
+    `skipped_unread`, so the balance the tests check still holds.
+
+    The note window (`note_first` / `note_last` / `rides_after_last_note`) is
+    reported too: this file's coach notes stop on their own, and a reader must
+    be able to see that rather than infer it from an empty chart.
     """
     out = {"seen": 0, "parsed": 0, "skipped_steady": 0, "skipped_unread": 0,
            "skipped_unlabelled": 0, "years": {}, "parsed_years": {},
-           "examples_unread": []}
+           "examples_unread": [], "refused_no_watts": 0,
+           "refused_too_short": 0, "refused_implausible": 0,
+           "refused_ambiguous": 0, "reads_direct": 0, "reads_inside": 0,
+           "reads_ceiling": 0,
+           "note_first": None, "note_last": None,
+           "rides_after_last_note": 0}
     if df is None or not len(df):
         return out
     if "WorkoutDescription" not in df.columns:
@@ -816,6 +963,7 @@ def audit(df: pd.DataFrame) -> dict:
     label = (df["training_type"].astype(object)
              if "training_type" in df.columns else None)
     yrs = df["date"].dt.year if "date" in df.columns else None
+    note_dates = []
 
     for i in df.index:
         d = desc.at[i]
@@ -825,24 +973,53 @@ def audit(df: pd.DataFrame) -> dict:
         y = int(yrs.at[i]) if yrs is not None and pd.notna(yrs.at[i]) else None
         if y is not None:
             out["years"][y] = out["years"].get(y, 0) + 1
+        if "date" in df.columns and pd.notna(df.at[i, "date"]):
+            note_dates.append(df.at[i, "date"])
         labelled = True if label is None else bool(_has_label(label.loc[[i]]).iloc[0])
-        reps = parse_prescribed(d)
-        if not reps:
+        outs = _outcomes(d)
+        if not outs:
             # No repetition syntax at all -> a steady ride, correctly no intervals.
-            if re.search(r"\d{1,2}\s*[x*]\s*[\d'\"mins]", main_set(d)):
-                out["skipped_unread"] += 1
-                if len(out["examples_unread"]) < 8:
-                    out["examples_unread"].append(str(d)[:150])
-            else:
-                out["skipped_steady"] += 1
+            out["skipped_steady"] += 1
+            continue
+        oks = [o for o in outs if o["status"] == "ok"]
+        if not oks:
+            out["skipped_unread"] += 1
+            reason = _refusal_reason(outs)
+            out[f"refused_{reason}"] += 1
+            if len(out["examples_unread"]) < 8:
+                out["examples_unread"].append(str(d)[:150])
             continue
         if not labelled:
             out["skipped_unlabelled"] += 1
             continue
         out["parsed"] += 1
+        if all(o.get("basis") == "direct" for o in oks):
+            out["reads_direct"] += 1
+        else:
+            out["reads_inside"] += 1
+        if any(o.get("ceiling") for o in oks):
+            # Overlaps direct/inside on purpose: a ceiling is still read from
+            # where it was written, it is only the KIND of number that differs.
+            out["reads_ceiling"] += 1
         if y is not None:
             out["parsed_years"][y] = out["parsed_years"].get(y, 0) + 1
+
+    if note_dates:
+        out["note_first"] = min(note_dates)
+        out["note_last"] = max(note_dates)
+        if "date" in df.columns:
+            out["rides_after_last_note"] = int(
+                (df["date"] > out["note_last"]).sum())
     return out
+
+
+def _refusal_reason(outs) -> str:
+    """The most informative reason among the refused reps, in priority order."""
+    have = {o.get("status") for o in outs}
+    for key in ("ambiguous", "too_short", "implausible", "no_watts"):
+        if key in have:
+            return key
+    return "no_watts"
 
 
 def coverage_note(p: pd.DataFrame, m: pd.DataFrame) -> dict:
