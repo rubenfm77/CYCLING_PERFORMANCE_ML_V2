@@ -56,6 +56,85 @@ def _present(cells: pd.DataFrame) -> str:
     return f"·{n}" if n else "—"
 
 
+def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
+    """Bars of interval watts by day — watts and exact length on every bar.
+
+    Kept separate from the page so the labels and the axis floor can be
+    asserted without a Streamlit session: everything a reader must not have to
+    estimate from geometry is printed on the chart itself.
+    """
+    # Equal-width slot per day: on a true date axis a 7-day gap gets one thin
+    # sliver and the eye can't read it. Every charted day gets the same width,
+    # in chronological order, with its date printed under the bar.
+    x_slots = [str(pd.Timestamp(d).date()) for d in S["day"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x_slots, y=S["w"], name="Interval watts",
+        marker_color=C["accent"], opacity=0.9,
+        # Watts first (top line), exact length under it: the reader tracks the
+        # evolution off a printed number and still never loses how long that
+        # number was held for.
+        text=[f"{iw.fmt_watts(w)} W\n{iw.fmt_rep(s)}"
+              for w, s in zip(S["w"], S["secs"])],
+        textposition="outside", textfont=dict(color=C["muted"], size=10),
+        customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
+                     iw.fmt_rep(r.dur_s)]
+                    for r in S.itertuples()],
+        hovertemplate="<b>%{x}</b><br>"
+                      "interval %{customdata[1]} W over %{customdata[0]}<br>"
+                      "session length %{customdata[2]}<extra></extra>",
+    ))
+    # Line showing average interval watts across days for comparison
+    if len(S) > 0:
+        mean_w = float(S["w"].mean())
+        fig.add_trace(go.Scatter(
+            x=x_slots, y=[mean_w] * len(S), mode="lines",
+            name="Avg interval watts",
+            line=dict(color=C["yellow"], width=2, dash="dot"),
+            connectgaps=False,
+            hovertemplate="<b>%{x}</b><br>"
+                          f"avg interval watts {iw.fmt_watts(mean_w)} W<extra></extra>",
+        ))
+
+    # Cut the axis just under the lowest bar: a zero baseline plus headroom
+    # turns 211 -> 244 W into nine near-identical columns, which is exactly
+    # when a reader stops seeing the evolution. The floor is printed in the
+    # subtitle and the watts are printed on every bar, so the truncation
+    # informs the eye instead of flattering the chart. Flat data is NOT zoomed
+    # into: when the bars barely differ the axis stays wide and the numbers do
+    # the talking.
+    lo_w, hi_w = float(S["w"].min()), float(S["w"].max())
+    span_w = hi_w - lo_w
+    if span_w >= max(hi_w * 0.08, 5.0):
+        y_min = max(0.0, lo_w - span_w * 0.30)
+        y_max = hi_w + span_w * 0.45 + 8.0     # headroom for the outside label
+    else:
+        y_min = max(0.0, lo_w - max(hi_w * 0.12, 10.0))
+        y_max = hi_w + max(hi_w * 0.12, 10.0) + 8.0
+
+    style_figure(
+        fig,
+        f"{tt} — interval watts by day, {cls} class"
+        "<br><sup>one equal-width slot per charted day, in date order; the label "
+        "above each bar is that interval's watts and its exact length. The "
+        "dotted line is the average of the interval watts across the charted "
+        "days and is never averaged into the bars. The y-axis is cut just under "
+        f"the lowest bar rather than starting at zero ({iw.fmt_watts(y_min)} W "
+        "is the floor), so day-to-day differences stay visible — read the "
+        "printed watts, not the ratio of two bar heights. Where two sessions "
+        "share a day the harder one is shown. Observed history, not a cause."
+        "</sup>",
+        H_STD,
+    )
+    _lane_legend(fig, [t.name for t in fig.data], min_w=430)
+    fig.update_layout(bargap=0.3)
+    fig.update_xaxes(type="category", tickangle=-45, automargin=True)
+    fig.update_yaxes(tickformat=",.0f", range=[y_min, y_max], autorange=False)
+    fig._y_floor = y_min          # noqa: B010 — asserted by tests, not rendered
+    return fig
+
+
 def _interval_by_day(ctx):
     """Bars of INTERVAL watts by day, with the session average as a line.
 
@@ -74,8 +153,9 @@ def _interval_by_day(ctx):
 
     Because that length varies from 5 to 55 minutes across sessions, one type is
     NOT enough on its own: a 258 W effort over 8:00 and a 188 W effort over
-    26:00 are not the same thing. So a length class is required too, and the
-    exact length is written on every bar.
+    26:00 are not the same thing. So a length class is required too, and both
+    the watts and the exact length are written on every bar, because the bar
+    geometry alone cannot carry a 211 -> 244 W difference the eye can trust.
     """
     df = ctx.df_all
     section("\U0001F3AF Intervals by day — watts of the interval")
@@ -155,65 +235,13 @@ def _interval_by_day(ctx):
                     f"{iw.fmt_watts(S['w'].mean())} W",
                     "mean of interval watts across days", "muted")
 
-    # Equal-width slot per day: on a true date axis a 7-day gap gets one thin
-    # sliver and the eye can't read it. Every charted day gets the same width,
-    # in chronological order, with its date printed under the bar.
-    x_slots = [str(pd.Timestamp(d).date()) for d in S["day"]]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=x_slots, y=S["w"], name="Interval watts",
-        marker_color=C["accent"], opacity=0.9,
-        text=[iw.fmt_rep(v) for v in S["secs"]],
-        textposition="outside", textfont=dict(color=C["muted"], size=10),
-        customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
-                     iw.fmt_rep(r.dur_s)]
-                    for r in S.itertuples()],
-        hovertemplate="<b>%{x}</b><br>"
-                      "interval %{customdata[1]} W over %{customdata[0]}<br>"
-                      "session length %{customdata[2]}<extra></extra>",
-    ))
-    # Line showing average interval watts across days for comparison
-    if len(S) > 0:
-        mean_w = float(S["w"].mean())
-        fig.add_trace(go.Scatter(
-            x=x_slots, y=[mean_w] * len(S), mode="lines",
-            name="Avg interval watts",
-            line=dict(color=C["yellow"], width=2, dash="dot"),
-            connectgaps=False,
-            hovertemplate="<b>%{x}</b><br>"
-                          f"avg interval watts {iw.fmt_watts(mean_w)} W<extra></extra>",
-        ))
-
-    style_figure(
-        fig,
-        f"{tt} — interval watts by day, {cls} class"
-        "<br><sup>one equal-width slot per charted day, in date order; the label "
-        "above each bar is the exact interval length. The dotted line is the "
-        "average of the interval watts across the charted days and is never "
-        "averaged into the bars. Where two sessions share a day the harder one "
-        "is shown. Observed history, not a cause.</sup>",
-        H_STD,
-    )
-    _lane_legend(fig, [t.name for t in fig.data], min_w=430)
-    fig.update_layout(bargap=0.3)
-    fig.update_xaxes(type="category", tickangle=-45, automargin=True)
-    fig.update_yaxes(tickformat=",.0f")
-    # Better scaling for small values
-    if len(S) > 0 and S["w"].max() > 0:
-        y_max = S["w"].max() * 1.25
-        y_min = S["w"].min() * 0.75  # Don't start at 0 if values are high
-        if y_min > 0:
-            y_min = max(0, y_min)
-        fig.update_yaxes(range=[y_min, y_max], autorange=False)
-    else:
-        fig.update_yaxes(rangemode="tozero")
-    show(fig)
+    show(_day_figure(S, tt, cls))
 
     st.caption(
         f"{len(S):,} day(s) of **{int(S['n_sessions'].sum()):,}** session(s). "
-        f"Each bar is one sustained interval of the {cls} class — the average "
-        "watts of that interval. Exact lengths are listed below."
+        f"Each bar is one sustained interval of the {cls} class — its watts, "
+        "printed over the bar, with the exact length it was held under them. "
+        "Exact lengths are listed below."
     )
 
     rows = []
