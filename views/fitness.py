@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 from core.components import callout, legend, metric_card, page_header, section, show
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, H_CARD, H_HERO, H_PAIR, H_STD,
                         STATE_COLORS, SURGERY, WEIGHT_KG, style_figure)
+from views.interval_watts import fitness_section
 
 
 def render(head, ctx):
@@ -155,6 +156,11 @@ def render(head, ctx):
             style_figure(fig_wkg, f"W/kg at each duration — {WEIGHT_KG:.0f} kg climber", H_PAIR)
             legend(fig_wkg, "right")
             show(fig_wkg)
+
+    # ── Interval watts over time + power-duration law ─────────────────────
+    # Full history (df_all), not the sidebar range: the sidebar defaults to
+    # six months and would delete every year compared here.
+    fitness_section(df_all)
 
     # ── FTP progression ────────────────────────────────────────────────────
     section("📈 FTP progression — month by month")

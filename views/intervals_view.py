@@ -663,9 +663,11 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "programmed effort, so finer classes would split one workout into "
         "two fake series; a 30 s rep keeps its real-world 30 s. "
         "Every row of the detail table still shows the exact measured "
-        "length. Family names are heuristics from "
-        "rep length + measured rest, shown next to the raw numbers; single "
-        "efforts (not grouped into a set) are listed too. **Intensity is "
+        "length. **The grouping is YOUR training type** — the label the "
+        "session was filed under (FTP, VO2MAX, BILLAT, AEROBIC BASE …), "
+        "not a guess from the rep length; only sessions with no label fall "
+        "back to the protocol heuristic (rep length + measured rest) or "
+        "“single efforts”. **Intensity is "
         "reported separately from the protocol name**: a 30-s rep's IF is "
         "intervals.icu extrapolating a 20-min equivalent from 30 s, so below "
         "45 s the band is shown as unusable instead of as a physiological "
@@ -944,8 +946,9 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                 "This series is shaped like threshold or VO₂ work, but the "
                 "measured intensity is under 88 % of FTP in the median set. "
                 "A coach reads that as tempo or an endurance block, not a "
-                "VO₂/threshold set: the family name describes the PROTOCOL "
-                "shape, this band describes HOW HARD it was ridden.",
+                "VO₂/threshold set: the family name says which training type "
+                "or protocol shape the series belongs to, this band says "
+                "HOW HARD it was actually ridden.",
                 C["yellow"], icon="🎚️")
 
     st.markdown(f"**Every session of {fam_name} at {dur_class_label(db)}:**")
@@ -969,10 +972,10 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "ever compared with work inside 10 s of each other. Rest between "
         "reps is measured from the recovery rows and is always shown. Where "
         "you have filed the session under a training type, that label is what "
-        "the family is called — a 30 s set from a BILLAT ride is a BILLAT set, "
-        "whatever the measured recovery did. Family names are otherwise "
-        "heuristics from rep length + measured rest, always shown next to the "
-        "raw values."
+        "the family is called — for EVERY type, not just BILLAT, so these "
+        "charts group by FTP / VO2MAX / AEROBIC BASE … as you filed them. "
+        "Only sessions with no label fall back to a protocol heuristic from "
+        "rep length + measured rest, always shown next to the raw values."
     )
     sets = build_sets(iv_full, acts, df_all)
     if len(sets) < 3:

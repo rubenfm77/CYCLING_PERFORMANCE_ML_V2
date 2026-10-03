@@ -7,10 +7,13 @@ series — never averaged, never trended together, never in one row.
 This module takes the SETS table (ml/set_evolution.build_sets, already
 grouped by intervals.icu's group_id) and:
 
-  * assigns each set a family: the heuristic protocol label from _style()
-    (Ronnestad 30/15, Billat 30/30, micro-reps, VO₂ sets, FTP/threshold
-    sets, sprints, long efforts) or "single efforts" when the effort was
-    not grouped into a set;
+  * assigns each set a family: FIRST the athlete's own training type
+    from the session label (FTP, VO2MAX, BILLAT, AEROBIC BASE …) — the
+    charts are grouped by training type, never guessed from rep length.
+    Only sessions with no label fall back to the heuristic protocol name
+    from _style() (Ronnestad 30/15, Billat 30/30, micro-reps, VO₂ sets,
+    FTP/threshold sets, sprints, long efforts) or "single efforts" when
+    the effort was not grouped into a set;
   * assigns a DURATION class = the length of ONE interval (a rep) on a
     whole-MINUTE grid with halves rounding DOWN (≤ 3.5 min → "3 min",
     > 3.5 → "4 min"; sub-minute protocols keep seconds) — the detector
@@ -36,14 +39,18 @@ Honesty rules:
     bootstrap 95 % CI; an ↑/↓ arrow is only printed when the CI clears zero
     AND |slope| ≥ 1 W/month — otherwise "→". A CI that straddles zero is
     shown as "→", not dressed up as progress;
-  * family labels are heuristics from rep length + measured rest, always
-    shown next to the raw numbers (they are not typed by intervals.icu).
+  * family labels are the athlete's training types where a label exists,
+    otherwise heuristics from rep length + measured rest, always shown
+    next to the raw numbers (they are not typed by intervals.icu).
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from core.theme import BLANK_TYPE_TOKENS
+from src.config import MAIN_TYPES
 
 # Duration CLASSES = the length of ONE interval (a rep), rounded to whole
 # minutes with halves going DOWN: up to 3.5 min is a "3 min" effort, more
@@ -62,9 +69,16 @@ MIN_CI_SESSIONS = 5      # distinct days needed for a bootstrap 95% CI — below
 #                         and the interval is fiction, so it stays blank
 
 FAMILY_ORDER = [
-    # The athlete's own label, and it comes first. A 30 s set from a session
-    # filed under BILLAT is a BILLAT set, whatever the measured recovery did.
+    # The athlete's own label, and it comes first. The grouping of these
+    # charts is the training type the athlete filed the session under —
+    # FTP, VO2MAX, BILLAT, AEROBIC BASE … — never a guess made from the
+    # rep length. BILLAT leads the list because it is the label whose
+    # authority was established first (tests/test_label_authority.py); the
+    # rest follow src.config.MAIN_TYPES in their agreed order. The
+    # heuristic protocol names below are only the FALLBACK for sessions
+    # that carry no label at all.
     "BILLAT",
+] + [t for t in MAIN_TYPES if t != "BILLAT"] + [
     "Ronnestad-style (30 s on / 15 s off)",
     "Billat-style (30 s on / 30 s off)",
     "micro-reps",
@@ -73,8 +87,13 @@ FAMILY_ORDER = [
     "sprints",
     "long efforts",
     "single efforts",
+    "unclassified sets",
 ]
-FAMILY_SHORT = {
+# Every agreed training type maps to itself — the chart shows the label the
+# athlete typed. Heuristic families keep their short form. Built with a
+# fallback so a family can never render as NaN.
+FAMILY_SHORT = {t: t for t in MAIN_TYPES}
+FAMILY_SHORT.update({
     "BILLAT": "BILLAT",
     "Ronnestad-style (30 s on / 15 s off)": "Ronnestad 30/15",
     "Billat-style (30 s on / 30 s off)": "Billat 30/30",
@@ -84,7 +103,8 @@ FAMILY_SHORT = {
     "sprints": "sprints",
     "long efforts": "long efforts",
     "single efforts": "single efforts",
-}
+    "unclassified sets": "unclassified sets",
+})
 
 SUMMARY_COLUMNS = ["Type", "Duration", "Sets", "Sessions", "First", "Last",
                    "First W", "Last W", "Δ W", "Δ %", "Best W", "W/month",
@@ -215,9 +235,21 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
     s["date"] = pd.to_datetime(s["date"])
     style = s["style"].fillna("") if "style" in s.columns else ""
     reps = s["reps"].astype(int)
+    # The family is the ATHLETE'S training type when the session carries one
+    # (FTP, VO2MAX, BILLAT, AEROBIC BASE …) — the label the athlete filed the
+    # session under, alias-normalised on load. A chart called "Training types
+    # over time" must show training types; a 4-min set in a session the
+    # athlete filed under VO2MAX is a VO2MAX series, not a "FTP / threshold"
+    # heuristic, and it must be able to sit next to every other VO2MAX series
+    # and be compared across years. The protocol heuristic from _style() and
+    # the single/unclassified fallbacks apply ONLY to sessions with no label
+    # (blank, "-", "—", "nan", "None"), where the heuristic is all there is.
+    dbt = (s["db_type"].fillna("").astype(str).str.strip()
+           if "db_type" in s.columns else pd.Series("", index=s.index))
     s["family"] = [
-        (st if st else ("single efforts" if n <= 1 else "unclassified sets"))
-        for st, n in zip(style, reps)
+        (t if t not in BLANK_TYPE_TOKENS else
+         (st if st else ("single efforts" if n <= 1 else "unclassified sets")))
+        for t, st, n in zip(dbt, style, reps)
     ]
     s["dur_b"] = [dur_bucket(x) for x in
                   pd.to_numeric(s["rep_secs"], errors="coerce")]
@@ -228,7 +260,10 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
         IF_BAND_BROKEN if fl else intensity_band(i, r)
         for fl, i, r in zip(flags, s["intensity"], s["rep_secs"])
     ]
-    s["series"] = (s["family"].map(FAMILY_SHORT) + " · " + s["dur_label"])
+    # .fillna(family): a label outside MAIN_TYPES (a type added later) still
+    # renders as itself instead of NaN.
+    s["series"] = (s["family"].map(FAMILY_SHORT).fillna(s["family"])
+                   + " · " + s["dur_label"])
     s.attrs["quality"] = report
     s.attrs["excluded"] = dropped
     return s

@@ -30,6 +30,7 @@ SET_COLUMNS = [
     "set_hr", "intensity", "load", "cad", "decoupling", "first_seq",
     "last_seq", "rest", "name", "temp", "ctl", "atl", "tsb", "tss_7",
     "acwr", "moving_time", "act_iv_n", "act_iv_secs", "act_iv_dist",
+    "act_start", "act_iv_rows",
     "set_ss_cp_w", "set_ss_w_prime_kj", "set_w5s_cv", "db_type",
 ]
 
@@ -151,6 +152,33 @@ def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
     else:
         sets["db_type"] = sets["db_type"].fillna("")
 
+    # Activity START SECOND and the raw row fingerprint, taken from the cache
+    # rows BEFORE the calendar normalization above. The duplicate screen needs
+    # the exact second a ride began: two activity ids that start at the same
+    # second and share an identical interval row are one ride synced twice —
+    # this cache holds 47 such pairs (identical start, identical rows, one copy
+    # carrying the athlete's own training type and the other carrying none).
+    # The calendar DATE is deliberately NOT used as this proof: two different
+    # rides of a double day share a date, and merging them would hand one ride
+    # the other's training type, which is the one thing a label may not do.
+    _st = (pd.DataFrame({"activity_id": iv["activity_id"].astype(str),
+                         "_start": pd.to_datetime(iv["date"], errors="coerce")})
+           .groupby("activity_id", sort=False)["_start"].min()
+           .rename("act_start").reset_index())
+
+    def _row_keys(frame: pd.DataFrame) -> pd.Series:
+        """One hashable key per interval row: seconds, avg watts, NP."""
+        parts = []
+        for c in ("secs", "avg_w", "np_w"):
+            v = pd.to_numeric(frame[c], errors="coerce").round(0)
+            parts.append(v.fillna(-1).astype("int64").astype(str))
+        return parts[0] + "@" + parts[1] + "@" + parts[2]
+
+    _rw = (iv.assign(_k=_row_keys(iv))
+           .groupby("activity_id", sort=False)["_k"]
+           .apply(lambda s: tuple(sorted(set(s))))
+           .rename("act_iv_rows").reset_index())
+
     w["distance"] = pd.to_numeric(w.get("distance"), errors="coerce")
     fp = (w.groupby("activity_id")
           .agg(act_iv_n=("seq", "size"),
@@ -159,6 +187,8 @@ def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
     fp["act_iv_secs"] = fp["act_iv_secs"].round(0)
     fp["act_iv_dist"] = fp["act_iv_dist"].round(0)
     sets = sets.merge(fp, on="activity_id", how="left")
+    sets = sets.merge(_st, on="activity_id", how="left")
+    sets = sets.merge(_rw, on="activity_id", how="left")
 
     # Training-state context: TSB/CTL/ATL + prior-week load from df_all.
     if df_all is not None and len(df_all):
@@ -190,9 +220,13 @@ def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
 # intervals.icu's detector is good, not perfect. This cache contained exactly
 # two kinds of problem worth acting on, and one field that is simply unreliable:
 #   1. the same ride present twice — a named activity AND an auto-named
-#      "Cycling" copy, same day, same moving time, same raw interval rows
-#      (4 confirmed pairs). Counting both would double-count the workout, so
-#      the whole duplicate activity is removed;
+#      "Cycling" copy. Two forms, both decided per ACTIVITY, never per set:
+#      (a) same start second + a shared identical interval row (the re-synced
+#          copy: 47 pairs in this cache, segmented differently so row counts
+#          and interval totals differ), (b) same day, same moving time, same
+#      raw interval rows (the older screen, 4 pairs). Counting both would
+#      double-count the workout, so the duplicate activity is removed — and
+#      the copy that survives is the one the athlete's file labels;
 #   2. efforts HOURS apart sharing one group_id — a "2 × 3 min set" with a
 #      49-minute gap is two separate efforts, so the set average and the rest
 #      figure are both invalid: excluded;
@@ -219,8 +253,12 @@ SHORT_BAND = "n/a — IF unreliable below 45 s"
 BROKEN_IF_BAND = "n/a — IF model artefact"
 
 QUALITY_REASONS = {
-    DUP_REASON: "same day, same moving time and the same raw interval "
-                "rows as another activity — the ride is in the cache twice",
+    DUP_REASON: "the same ride is in the cache twice under two activity ids: "
+                "it starts at the same second and shares an identical interval "
+                "row (or, when no start is available, it matches another row "
+                "set on the same day, moving time and interval totals) — "
+                "counting both would double-count the workout, so the copy the "
+                "athlete's own file does not label is the one removed",
     GAP_REASON: "reps sit minutes-to-hours apart; one block, not an "
                 "interval set — the average and the rest figure are invalid",
     SHORT_FLAG: "detector rows under 15 s: watts kept, intensity discarded",
@@ -248,6 +286,41 @@ def quality_gates(sets: pd.DataFrame):
 
     # 1 — duplicate rides, decided at ACTIVITY level, not set level
     dup_act = pd.Series(False, index=s.index)
+    keep_start = set()          # copies the start-second rule decides to keep
+    # 1b — the same ride under a SECOND activity id. The moving-time screen
+    # below cannot see these: the re-synced copy is segmented differently, so
+    # its row count and its total interval seconds differ. What it cannot
+    # change is WHEN the ride began or the watts of a shared row. Rule: two
+    # activity ids starting at the same second with at least one byte-identical
+    # interval row are one ride synced twice, and the copy that survives is the
+    # one the athlete's own file labels — so the workout keeps its training
+    # type instead of falling back to a heuristic family, and the ride is
+    # counted once instead of twice.
+    if "act_start" in s.columns and "act_iv_rows" in s.columns:
+        _lab = (s["db_type"].astype(str).str.strip() if "db_type" in s.columns
+                else pd.Series("", index=s.index))
+        _per = (pd.DataFrame({"activity_id": s["activity_id"].astype(str),
+                              "st": pd.to_datetime(s["act_start"],
+                                                   errors="coerce"),
+                              "rows": s["act_iv_rows"],
+                              "lab": _lab.ne("").astype(int)})
+                .drop_duplicates("activity_id"))
+        _dup_start = set()
+        for _stv, _g in _per[_per["st"].notna()].groupby("st", sort=False):
+            if len(_g) < 2:
+                continue
+            _g = _g.sort_values("lab", ascending=False, kind="stable")
+            _anchor = _g.iloc[0]                     # the labelled copy first
+            keep_start.add(_anchor["activity_id"])
+            for _ in range(1, len(_g)):
+                _r = _g.iloc[_]
+                _rows_a, _rows_b = _anchor["rows"], _r["rows"]
+                _shared = bool(_rows_a) and bool(_rows_b) and \
+                    bool(set(_rows_a) & set(_rows_b))
+                if _shared:
+                    _dup_start.add(_r["activity_id"])
+        if _dup_start:
+            dup_act = dup_act | s["activity_id"].astype(str).isin(_dup_start)
     have_fp = {"moving_time", "act_iv_n", "act_iv_secs"}.issubset(s.columns)
     if have_fp:
         mt = pd.to_numeric(s["moving_time"], errors="coerce")
@@ -270,7 +343,11 @@ def quality_gates(sets: pd.DataFrame):
                           & (per_act["n_iv"] > 0)]
         drop_acts = (per_act[per_act.duplicated("fp", keep="first")]
                      ["activity_id"].unique())
-        dup_act = s["activity_id"].isin(drop_acts)
+        # never drop a copy the start-second rule above decided to KEEP: the
+        # two rules must not between them delete both copies of one ride
+        if keep_start:
+            drop_acts = [a for a in drop_acts if a not in keep_start]
+        dup_act = dup_act | s["activity_id"].isin(drop_acts)
 
     # 2 — multi-rep sets whose reps are minutes-to-hours apart
     too_gappy = multi & (rest > np.maximum(MAX_PROTOCOL_REST_S,
