@@ -44,6 +44,39 @@ BUCKET_LABELS = ["0–30 s", "30–60 s", "1–2 min", "2–3 min", "3–5 min",
 
 
 # ── Set construction ─────────────────────────────────────────────────────────
+def _with_context(sets: pd.DataFrame, df_all=None) -> pd.DataFrame:
+    """Training-state context: TSB/CTL/ATL + prior-week load from df_all.
+
+    Merged asof-backward on the set date. Shared by `build_sets` and
+    `fill_peak_efforts` so a set added from a second source carries the same
+    context columns — a row that silently lacked them would fall out of every
+    TSB view without anyone saying so.
+    """
+    if df_all is not None and len(df_all):
+        g = df_all.sort_values("date").set_index("date")
+        try:
+            ctl = g["ctl"].resample("1D").last().ffill()
+            atl = g["atl"].resample("1D").last().ffill()
+            day_tss = g["tss"].resample("1D").sum()
+            ctx = pd.DataFrame({"ctl": ctl, "atl": atl})
+            ctx["tsb"] = ctx["ctl"] - ctx["atl"]
+            ctx["tss_7"] = day_tss.rolling(7, min_periods=1).sum().shift(1)
+            ctx["acwr"] = ctx["atl"] / ctx["ctl"].replace(0.0, np.nan)
+            ctx = ctx.reset_index().rename(columns={"index": "date"})
+            if "date" not in ctx.columns and g.index.name:
+                ctx = ctx.rename(columns={g.index.name: "date"})
+            sets = sets.sort_values("date")
+            sets = pd.merge_asof(sets, ctx, on="date", direction="backward")
+        except Exception:
+            for c in ("ctl", "atl", "tsb", "tss_7", "acwr"):
+                if c not in sets.columns:
+                    sets[c] = np.nan
+    for c in ("ctl", "atl", "tsb", "tss_7", "acwr", "temp"):
+        if c not in sets.columns:
+            sets[c] = np.nan
+    return sets.reset_index(drop=True)
+
+
 def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
                df_all=None) -> pd.DataFrame:
     """Group WORK reps into sets (group_id), with measured rest + context.
@@ -191,29 +224,127 @@ def build_sets(iv: pd.DataFrame, acts: pd.DataFrame | None = None,
     sets = sets.merge(_rw, on="activity_id", how="left")
 
     # Training-state context: TSB/CTL/ATL + prior-week load from df_all.
-    if df_all is not None and len(df_all):
-        g = df_all.sort_values("date").set_index("date")
-        try:
-            ctl = g["ctl"].resample("1D").last().ffill()
-            atl = g["atl"].resample("1D").last().ffill()
-            day_tss = g["tss"].resample("1D").sum()
-            ctx = pd.DataFrame({"ctl": ctl, "atl": atl})
-            ctx["tsb"] = ctx["ctl"] - ctx["atl"]
-            ctx["tss_7"] = day_tss.rolling(7, min_periods=1).sum().shift(1)
-            ctx["acwr"] = ctx["atl"] / ctx["ctl"].replace(0.0, np.nan)
-            ctx = ctx.reset_index().rename(columns={"index": "date"})
-            if "date" not in ctx.columns and g.index.name:
-                ctx = ctx.rename(columns={g.index.name: "date"})
-            sets = sets.sort_values("date")
-            sets = pd.merge_asof(sets, ctx, on="date", direction="backward")
-        except Exception:
-            for c in ("ctl", "atl", "tsb", "tss_7", "acwr"):
-                if c not in sets.columns:
-                    sets[c] = np.nan
-    for c in ("ctl", "atl", "tsb", "tss_7", "acwr", "temp"):
-        if c not in sets.columns:
-            sets[c] = np.nan
-    return sets.reset_index(drop=True)
+    return _with_context(sets, df_all)
+
+
+# ── The second source: Intervals.icu's peak-power reading ────────────────────
+# The interval detector segments a ride by power/cadence stability, so a
+# sustained block comes back in pieces: on 15 Sep 2026 the detector's longest
+# row for that FTP session was 485 s, while Intervals.icu's peak-power model
+# reports 231 W held over 1200 s. The Evolution page plots the peak reading,
+# which is why 20-minute intervals are obvious there and invisible here.
+# The rule below adds a reading ONLY where the detector did not find that
+# effort, so one effort is never counted twice — and `src` on every row says
+# which of the two sources reported it.
+PEAK_W_COL = "icu_pm_ftp_watts"
+PEAK_S_COL = "icu_pm_ftp_secs"
+PEAK_MIN_S = 600.0     # 10 min — the sustained domain the detector cuts up
+PEAK_NEAR_S = 120.0    # a detected set within 2 min IS this effort
+PEAK_SRC = "peak meter (intervals.icu)"
+DETECTED_SRC = "detected interval"
+
+
+def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
+                      min_s: float = PEAK_MIN_S,
+                      near_s: float = PEAK_NEAR_S):
+    """Add the peak-power reading of an effort the detector did not report.
+
+    Why this exists: the detector found no row of 10 min or longer on the
+    20-minute FTP sessions of Sep 2026, so the "20 min" duration class on the
+    Intervals page carried a single session while Evolution showed every one
+    of them. The peak meter holds the same session's best sustained window.
+
+    What it does, and what it refuses to do:
+
+      * only efforts of at least `min_s` seconds — the long-effort domain
+        where the detector is known to cut sustained work; short intervals
+        already come through the detector and are untouched;
+      * only when THAT activity has no detected set within `near_s` seconds
+        of the reading (the detector found the same effort, under its own
+        segmentation) and no detected set in the same whole-minute duration
+        class (the two would then be the same effort filed twice);
+      * never more than one reading per activity — the peak meter reports one
+        window per ride;
+      * every added row carries `Source = peak meter (intervals.icu)`, every
+        existing row `Source = detected interval`, and the count is returned
+        so the page can state it instead of hiding it.
+
+    Returns `(sets, n_added)`.
+    """
+    src = (sets.copy() if sets is not None else pd.DataFrame())
+    if not len(src):
+        src = src if len(src.columns) else pd.DataFrame(columns=SET_COLUMNS)
+    if "Source" not in src.columns:      # never overwrite an earlier tag
+        src["Source"] = DETECTED_SRC
+
+    need = {PEAK_W_COL, PEAK_S_COL, "date"}
+    if df_all is None or not len(df_all) or not need.issubset(df_all.columns):
+        return src, 0
+
+    # One candidate per activity id: the peak meter reports ONE window per ride.
+    cols = list(need) + [c for c in ("id", "training_type")
+                         if c in df_all.columns]
+    cand = df_all[cols].copy()
+    cand = cand.assign(pk_w=pd.to_numeric(cand[PEAK_W_COL], errors="coerce"),
+                       pk_s=pd.to_numeric(cand[PEAK_S_COL], errors="coerce"))
+    cand = cand[cand["pk_w"].notna() & cand["pk_s"].notna()
+                & (cand["pk_s"] >= min_s)]
+    cand["date"] = pd.to_datetime(cand["date"], errors="coerce").dt.normalize()
+    cand = cand[cand["date"].notna()]
+    if "id" in cand.columns:
+        cand = cand[cand["id"].notna()]
+    if not len(cand):
+        return src, 0
+
+    # What the detector already reports, PER ACTIVITY — the checks are never
+    # made across two different rides of a day.
+    by_act: dict = {}
+    if len(src):
+        _r = pd.to_numeric(src["rep_secs"], errors="coerce")
+        for a, g in zip(src["activity_id"].astype(str), _r):
+            if not np.isnan(g):
+                by_act.setdefault(a, []).append(float(g))
+    filled = set()
+
+    rows = []
+    for r in cand.sort_values("date").itertuples(index=False):
+        act = str(getattr(r, "id", "") or "")
+        if not act:
+            # No activity id in this file: key the reading on the day itself,
+            # so two days never collapse into one bucket.
+            act = f"peak:{r.date:%Y%m%d}"
+        secs, watts = float(r.pk_s), float(r.pk_w)
+        if act in filled:
+            continue
+        have = by_act.get(act, [])
+        if any(abs(x - secs) <= near_s for x in have):
+            continue                       # the detector found this effort
+        cls = _dur_label(secs)
+        if any(_dur_label(x) == cls for x in have):
+            continue                       # same class, same ride: already in
+        filled.add(act)
+        db = str(getattr(r, "training_type", "") or "").strip()
+        rows.append({
+            "activity_id": act, "date": r.date,
+            "_key": f"peak:{act}:{secs:.0f}s",
+            "reps": 1, "rep_secs": secs, "set_w": watts,
+            "set_np": np.nan, "set_hr": np.nan, "intensity": np.nan,
+            "load": np.nan, "cad": np.nan, "decoupling": np.nan,
+            "first_seq": np.nan, "last_seq": np.nan, "rest": np.nan,
+            "name": "", "temp": np.nan,
+            "moving_time": np.nan, "act_iv_n": np.nan,
+            "act_iv_secs": np.nan, "act_iv_dist": np.nan,
+            "act_start": pd.NaT, "act_iv_rows": np.nan,
+            "set_ss_cp_w": np.nan, "set_ss_w_prime_kj": np.nan,
+            "set_w5s_cv": np.nan, "db_type": db,
+            "Source": PEAK_SRC,
+        })
+    if not rows:
+        return src, 0
+
+    add = pd.DataFrame(rows).reindex(columns=list(src.columns))
+    out = pd.concat([src, add], ignore_index=True, sort=False)
+    return _with_context(out, df_all), len(rows)
 
 
 # ── Data-quality gates ───────────────────────────────────────────────────────

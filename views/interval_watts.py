@@ -1,23 +1,36 @@
-# views/interval_watts.py — interval watts, not average watts. (NEW FILE)
+# views/interval_watts.py — POWER LAW: watts against duration. (NEW FILE)
 r"""
-The request was "isolate not avg watts but the interval watts". This page is that
-isolation: average power is not offered here at all, and the only watt figures on
-screen come from a rep.
+The request was "isolate not avg watts but the interval watts"; later "this page
+is not useful based on what we have in evolution or intervals — maybe rename it
+power law and focus on that". So the page is named for the one thing only it
+does: the power-duration LAW, the relation between watts and how long you can
+hold them. Average power is not offered here at all, and the only watt figures
+on screen come from a rep.
+
+What was cut, and why: the two "over time" charts (the line per rep length class
+and the one-bar-per-day chart) drew the same rows Evolution already draws on a
+date axis. A page that repeats another page is not useful, so those charts are
+gone and the tab says where they went. The law leads the tab now, with the
+coverage tables underneath it — they are what the law is fitted on.
 
 Interval watts exist in two places in this athlete's file, and they cover
 different years:
 
   MEASURED   intervals.icu auto-detected efforts, 2025-2026. Real watts, and the
-             only interval data for this year. Tab 1.
+             only interval data for this year. The law tab below.
   PRESCRIBED the coach's own Spanish/Catalan comments in `WorkoutDescription`,
              2019-2025, and NOTHING in 2026. The watts are a target RANGE and the
-             lower end is used, per the athlete's instruction. Tab 2.
+             lower end is used, per the athlete's instruction. That half is
+             rendered by `prescribed_tab()` — now called from the **Evolution**
+             page, where prescribed-vs-actual belongs, and no longer from
+             `render()` below.
 
-They are in separate tabs on purpose. The prescribed comments stop in 2025 and the
+They are kept apart on purpose. The prescribed comments stop in 2025 and the
 measured efforts begin in 2025, so drawing one line through both would mean
 interpolating 2025-2026 out of nothing and calling it the athlete's progress. The
-tab boundary is the honest rendering of that wall, and the wall is also printed
-in numbers so it is not something the reader has to infer from the layout.
+boundary between the two pages is the honest rendering of that wall, and the
+wall is also printed in numbers so it is not something the reader has to infer
+from the layout.
 
 Every chart here is bucketed by REP LENGTH CLASS and never by a single pooled
 "interval watts" number, because a 3x1' effort and a 2x20' effort are not the same
@@ -251,10 +264,13 @@ def fitness_section(df_all: pd.DataFrame) -> None:
 def render(head, ctx):
     page_header(
         "\U0001F3AF",
-        "Interval watts — the watts of the rep",
-        "Not average power. Every figure here comes from a single interval, and "
-        "intervals of different lengths are never averaged together: a 30-second "
-        "effort and a 20-minute effort are separate series with separate counts.",
+        "Power law — watts against duration",
+        "Not average power, and not a timeline: the relation between how many "
+        "watts and how long you can hold them. Every figure comes from a single "
+        "interval, and intervals of different lengths are never averaged "
+        "together — a 30-second effort and a 20-minute effort are separate "
+        "series with separate counts. Watts over DATE are on Evolution, watts "
+        "over duration are here.",
     )
 
     st.caption(
@@ -306,23 +322,21 @@ def render(head, ctx):
             f"{cov['measured_years'][0]} onward**, and almost none before. "
             f"So this year has measured interval watts and no prescribed ones, and "
             f"the years before have prescribed ones and almost no measured ones. "
-            f"They are shown in separate tabs and are never joined into one line, "
+            f"They are shown on **separate pages** — the prescriptions live on "
+            f"**Evolution**, the measured efforts here — and are never joined "
+            f"into one line, "
             f"because 'the watts you were told to do' and 'the watts you actually "
             f"did' are different numbers and bridging the gap between them would "
             f"invent a trend that no measurement supports.",
             C["orange"], "🚧")
 
-    tab_meas, tab_pres, tab_audit = st.tabs([
-        "\U0001F4CA Measured — this year",
-        "\U0001F4DD Prescribed — the coach's target",
+    tab_meas, tab_audit = st.tabs([
+        "\U0001F3AF The power-duration law",
         "\U0001F50D What could be read",
     ])
 
     with tab_meas:
-        _measured_tab(M)
-
-    with tab_pres:
-        _prescribed_tab(P)
+        _law_tab(M)
 
     with tab_audit:
         _audit_tab(a, cov, P, M)
@@ -418,8 +432,15 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
     )
 
 
-def _measured_tab(M: pd.DataFrame):
-    """Real measured interval watts. One type at a time, one series per length."""
+def _law_tab(M: pd.DataFrame):
+    """The power-duration law, then the coverage it was fitted on.
+
+    Renamed from `_measured_tab` when the timelines were given to Evolution:
+    what is left on this tab is the relation between watts and duration (the
+    law), the year x length-class coverage grid the fit rests on, and the
+    year-over-year comparison of one length class. No chart here has time on
+    an axis.
+    """
     if not len(M):
         callout("No measured efforts", "No session carries a detected-effort "
                 "summary.", C["red"], "⚠️")
@@ -476,7 +497,14 @@ def _measured_tab(M: pd.DataFrame):
         _law_section(M_all, tt, 0, None)
         return
 
-    # Coverage first, so the reader sees the shape of the data before the chart.
+    # The law comes FIRST: this page is named after it. It is fitted on every
+    # effort of the type in every year, so the year selector above only
+    # describes the coverage tables underneath — never the fit itself.
+    M_yr = M[M["year"] == yr] if yr is not None else M
+    M_tt = M_yr[M_yr["tt"] == tt]
+    _law_section(M_all, tt, int(len(M_tt)), phys)
+
+    # Coverage, so the reader sees the shape of the data the law was fitted on.
     grid = _cells_datable(mine, [yr], "Rep length class")
     if len(grid):
         st.markdown(f"**Detected efforts per rep length class, {yr}** — bold "
@@ -490,95 +518,17 @@ def _measured_tab(M: pd.DataFrame):
                    f"and are left unplotted: "
                    + ", ".join(f"{r.cls} (n={int(r.n)})" for r in thin.itertuples()))
 
-    # ── The chart: TIME on the x-axis ─────────────────────────────────────────
-    section("\U0001F4C8 Measured interval watts over time")
+    # ── Where the same efforts are drawn over TIME ────────────────────────────
+    # Deliberately not here. The date-axis charts of these efforts (the line
+    # per rep length class, one bar per day) belong to Evolution, which is the
+    # page that answers "how did this evolve" for the whole app; the Intervals
+    # page answers "what does one type at one duration look like". Drawing the
+    # same rows a third time is what made this page feel not useful.
     st.caption(
-        f"**{phys} efforts of {tt}, {yr}: one point per day, x-axis is the "
-        "date.** One series per rep length class; two classes never share a "
-        "number. The dotted line is the average of the charted points."
+        "**Watts over time live on Evolution**, where they are drawn on a date "
+        "axis for the whole history. This page is watts AGAINST duration: the "
+        "law, and the coverage it was fitted on."
     )
-    M_yr = M[M["year"] == yr] if yr is not None else M
-    M_tt = M_yr[M_yr["tt"] == tt]
-
-    if not len(M_tt):
-        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
-                f"effort in {yr}.", C["orange"], "\U0001F6A7")
-        _law_section(M_all, tt, 0, phys)
-        return
-
-    daily = (M_tt.groupby(["cls", "date"], as_index=False)
-             .agg(med_w=("w", "median"), n=("w", "size"),
-                  rep_secs=("secs", "median")))
-    daily = daily.sort_values("date")
-    show(_time_figure(daily, tt, phys, yr))
-
-    st.caption(
-        f"{len(daily):,} day(s), {int(daily['n'].sum()):,} detected effort(s). "
-        "Every point carries its n in the hover; the class under each line is "
-        "printed in the legend, so a 15-minute line is never read as a "
-        "3-minute one."
-    )
-
-    # ── The same data as bars, DATE on the x-axis ────────────────────────────
-    # Literally the same rows as the line chart above (same physiology, same
-    # year, same type) — "Same data" has to be true. What changes is the axis:
-    # the date, not the length class. One bar per DAY, coloured by rep length
-    # class, so two classes on the same day stand side by side and never share
-    # a number. If no year is selected, every year in the file is drawn.
-    section("\U0001F4CA Same data, one bar per day")
-    M_bars = M_tt
-    bars = (M_bars.groupby(["date", "cls"], as_index=False)
-            .agg(med_w=("w", "median"), n=("w", "size"),
-                 rep_secs=("secs", "median"))
-            .sort_values(["date", "cls"]))
-    if not len(bars):
-        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
-                f"effort in {yr}.", C["orange"], "\U0001F6A7")
-    else:
-        classes = sorted(bars["cls"].unique())
-        fig = go.Figure()
-        for cls in classes:
-            d = bars[bars["cls"] == cls]
-            fig.add_trace(go.Bar(
-                x=d["date"], y=d["med_w"], name=cls,
-                marker_color=_rep_color(cls), opacity=0.88,
-                text=[f"{iw.fmt_watts(w)} W\nn={int(n):,}"
-                      for w, n in zip(d["med_w"], d["n"])],
-                textposition="outside", textfont=dict(color=C["muted"], size=9),
-                customdata=[[f"{iw.fmt_watts(w)} W", f"n = {int(n):,} effort(s)",
-                             iw.fmt_rep(r)]
-                            for w, n, r in zip(d["med_w"], d["n"],
-                                               d["rep_secs"])],
-                hovertemplate="<b>%{fullData.name}</b> · %{x|%d %b %Y}<br>"
-                              "median %{customdata[0]}<br>%{customdata[1]}<br>"
-                              "typical rep %{customdata[2]}<extra></extra>",
-            ))
-        style_figure(
-            fig,
-            f"{tt} — {phys} detected interval watts, one bar per day, "
-            f"{bars['date'].min():%d %b %Y} → {bars['date'].max():%d %b %Y}"
-            f"<br><sup>x-axis is the date. One bar per day, split by rep length "
-            f"class, n on every bar; a day with no effort is left empty rather "
-            f"than drawn as zero watts.</sup>",
-            H_STD)
-        _lane_legend(fig, classes, min_w=430)
-        fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.10)
-        fig.update_xaxes(type="date")
-        fig.update_yaxes(tickformat=",.0f", rangemode="tozero")
-        show(fig)
-
-        st.caption(
-            f"{bars['date'].nunique():,} day(s) with at least one {phys} effort "
-            f"of {tt}, {int(bars['n'].sum()):,} effort(s), "
-            f"{bars['date'].min():%d %b %Y} → {bars['date'].max():%d %b %Y} "
-            "— the same rows as the chart above, read by day instead of by "
-            "line. Bars are grouped, not stacked: classes on the same day sit "
-            "side by side and each keeps its own n, and a day without an effort "
-            "is left empty rather than drawn as zero watts."
-        )
-
-    # ── Power-duration law ──────────────────────────────────────────────────
-    _law_section(M_all, tt, int(len(M_tt)), phys)
 
     # ── Every cell, including the thin ones ────────────────────────────────
     section("\U0001F4CB Every cell, thinnest included")
@@ -650,8 +600,15 @@ def _measured_tab(M: pd.DataFrame):
             show(fig2)
 
 
-def _prescribed_tab(P: pd.DataFrame):
-    """The coach's target watts. Lower end of the range, year over year."""
+def prescribed_tab(P: pd.DataFrame):
+    """The coach's target watts. Lower end of the range, year over year.
+
+    Rendered from the **Evolution** page since the page split: prescribed
+    watts are a target that evolved over the years, so they belong with the
+    charts that answer "how did this change", not with the power-duration law.
+    It still lives here because the parser, the coverage numbers and the
+    never-join-with-measured rule all live here too.
+    """
     if not len(P):
         callout("No prescriptions", "No description in this file carries a "
                 "parseable interval target.", C["red"], "⚠️")
@@ -885,7 +842,8 @@ def _audit_tab(a: dict, cov: dict, P: pd.DataFrame, M: pd.DataFrame):
             f"{cov['prescribed_last_year'] or '—'}; the detected efforts run "
             f"{cov['measured_years'][0] if cov['measured_years'] else '—'}–"
             f"{cov['measured_last_year'] or '—'}. They meet in one year and nowhere "
-            f"else, so they are in separate tabs and no line crosses between them.\n"
+            f"else, so they sit on separate pages and no line crosses between "
+            f"them — the prescriptions on Evolution, the measured efforts here.\n"
             f"- **Lower end of the range** is used for a prescribed target, as "
             f"instructed — the end the coach was willing to call a success. The "
             f"upper end is carried alongside and shown in the hover rather than "

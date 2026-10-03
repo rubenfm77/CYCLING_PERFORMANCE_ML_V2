@@ -105,7 +105,7 @@ _SPECS = [
     ("sessions", "📅", "Sessions", partial(_render_of("sessions"), head, ctx), False),
     ("evolution", "\U0001F4C8", "Evolution",
      partial(_render_of("evolution"), head, ctx), False),
-    ("interval-watts", "\U0001F3AF", "Interval watts",
+    ("interval-watts", "\U0001F3AF", "Power law",
      partial(_render_of("interval_watts"), head, ctx), False),
 ]
 

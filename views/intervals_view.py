@@ -23,7 +23,8 @@ from ml.composition_intervals import run_composition
 from ml.exertion_forecast import metric_counts, run_exertion_forecast
 from ml.interval_forecast import run_band_forecast
 from ml.protocol_reps import run_protocol_view
-from ml.set_evolution import (add_signatures, build_sets, quality_gates,
+from ml.set_evolution import (add_signatures, build_sets, fill_peak_efforts,
+                              quality_gates,
                               run_duration_evolution, run_set_evolution)
 from ml.type_comparison import (FAMILY_SHORT, dur_class_label, fmt_min,
                                 fmt_rest, fmt_secs, intensity_band,
@@ -55,6 +56,32 @@ def _add_fan(fig: go.Figure, path: pd.DataFrame, rgb: str = ACCENT_RGB) -> None:
     fig.add_trace(go.Scatter(x=path["date"], y=path["y"], mode="lines",
                              name="Forecast",
                              line=dict(color=f"rgba({rgb},1)", width=3.5)))
+
+
+def _peak_disclosure(n_peak: int) -> None:
+    """Say which sets came from the peak meter, before any chart uses them.
+
+    The detector and the peak meter are two sources for the same ride, and a
+    chart that quietly used both would be a splice. The count is stated, the
+    rule that keeps the two from ever describing the same effort is stated,
+    and the Source column on every set row keeps saying it afterwards.
+    """
+    if n_peak <= 0:
+        return
+    st.caption(
+        f"**{n_peak} set{'s' if n_peak != 1 else ''} on this page come from "
+        "the peak-power meter, not from the interval detector.** The detector "
+        "segments a ride by power and cadence, so it cuts sustained work into "
+        "pieces: on 15 Sep 2026 its longest row for that FTP session was "
+        "8 min 05 s, while Intervals.icu's peak meter holds 231 W for 20:00 — "
+        "which is why every 20-minute session shows on Evolution and none of "
+        "them were here. A reading is added only for an effort of 10 min or "
+        "longer where that ride has **no** detected set within two minutes of "
+        "it **and** none in the same whole-minute duration class, so one "
+        "effort is never counted twice; it enters as a single-rep set (one "
+        "held window, no rest figure), and the **Source** column of the detail "
+        "table says which source reported every row."
+    )
 
 
 def _model_calls(result: dict) -> None:
@@ -675,10 +702,12 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "sub-threshold rather than quietly counted as VO₂ work."
     )
     sets = build_sets(iv_full, acts, df_all)
+    sets, n_peak = fill_peak_efforts(sets, df_all)
     if len(sets) < 3:
         callout("Not enough sets", "Fewer than 3 sets in the cached history "
                 "— sync more activities first.", C["yellow"], icon="⏸️")
         return
+    _peak_disclosure(n_peak)
     sets, _ = add_signatures(sets)
     res = _type_comparison_cached(sets)
     if not res.get("ok"):
@@ -978,6 +1007,7 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "rep length + measured rest, always shown next to the raw values."
     )
     sets = build_sets(iv_full, acts, df_all)
+    sets, n_peak = fill_peak_efforts(sets, df_all)
     if len(sets) < 3:
         callout("Not enough sets",
                 "Fewer than 3 sets in the cached history — sync more "
@@ -1004,6 +1034,7 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
               f" further sets are flagged for an unusable intensity field and "
               f"kept. Every excluded row is listed in the training-types tab.",
             C["yellow"], icon="🧹")
+    _peak_disclosure(n_peak)
     sets, clusters = add_signatures(sets)
 
     sig_of, labels = {}, []

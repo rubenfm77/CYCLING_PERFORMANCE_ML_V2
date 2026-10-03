@@ -213,6 +213,52 @@ def fmt_rep(secs) -> str:
     return f"{m}:{s:02d}" if s else f"{m}:00"
 
 
+def fmt_axis_dur(secs) -> str:
+    """Duration-axis label: seconds under 90 s, whole minutes above it.
+
+    The athlete's rule, asked for directly: the power curve's x-axis must
+    read in minutes, not as `4824 s`. Two things are kept while doing that.
+    The split point is the SAME 90-second one `fmt_rep` uses, so this axis
+    agrees with every other duration on the dashboard. And the minutes are
+    rounded halves-DOWN — the house rule `dur_bucket` and `_dur_label`
+    already use — so an axis tick never disagrees with the class a session
+    is filed under. Exactness is not traded away: the exact measured length
+    stays on the hover and in `duration`; only the tick is rounded, and
+    `axis_labels()` refuses to let two ticks round to the same word.
+    """
+    if secs is None or (isinstance(secs, float) and np.isnan(secs)):
+        return "—"
+    secs = float(secs)
+    if secs < 90:
+        return f"{secs:.0f} s"
+    return f"{int(np.ceil(secs / 60.0 - 0.5)):d} min"
+
+
+def _mss(secs: float) -> str:
+    """m:ss — what a colliding minute tick falls back to."""
+    m, s = divmod(int(round(float(secs))), 60)
+    return f"{m}:{s:02d}" if s else f"{m}:00"
+
+
+def axis_labels(seqs) -> list:
+    """Minute labels for a whole duration axis; m:ss only where minutes clash.
+
+    Two points four seconds apart both become "5 min" and the axis would
+    then carry two ticks reading identically — a number nobody can tell
+    apart. Those points fall back to m:ss (5:01 / 5:05) so every tick keeps
+    its own name. Seconds under 90 s are already exact and never need it.
+    """
+    vals = [None if (s is None or (isinstance(s, float) and np.isnan(s)))
+            else float(s) for s in seqs]
+    labs = ["—" if v is None else fmt_axis_dur(v) for v in vals]
+    count = {}
+    for lab in labs:
+        count[lab] = count.get(lab, 0) + 1
+    return [(fmt_rep(v) if (v is not None and count[lab] > 1 and v < 90)
+             else _mss(v) if (v is not None and count[lab] > 1) else lab)
+            for v, lab in zip(vals, labs)]
+
+
 def fmt_watts(v, decimals: int = 0) -> str:
     """Thousands separators on big numbers, per the display rule."""
     if v is None or (isinstance(v, float) and np.isnan(v)):

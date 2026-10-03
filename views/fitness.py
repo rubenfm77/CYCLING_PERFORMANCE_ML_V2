@@ -127,6 +127,9 @@ def render(head, ctx):
         if "date" in pc_df.columns:
             pc_df["date"] = pd.to_datetime(pc_df["date"], errors="coerce")
         pc_df["wkg"] = pc_df["watts"] / WEIGHT_KG   # one weight value, from theme
+        # The TICKS read in minutes (the athlete's rule); the exact measured
+        # length stays in `duration`, printed on every hover.
+        _pc_axis = iw.axis_labels(pc_df["secs"])
         _hover_ok = {"date", "n", "duration"}.issubset(pc_df.columns)
         cc = st.columns(2)
         with cc[0]:
@@ -154,7 +157,7 @@ def render(head, ctx):
                                         line=dict(color=C["green"], width=2, dash="dot"),
                                         name=f"Target FTP ({FTP_TARGET} W)"))
             fig_pc.update_xaxes(type="log", tickvals=pc_df["secs"].tolist(),
-                                ticktext=pc_df["duration"].tolist())
+                                ticktext=_pc_axis)
             style_figure(fig_pc, "Power curve — best mean-maximal power", H_PAIR)
             legend(fig_pc, "right")
             show(fig_pc)
@@ -162,11 +165,19 @@ def render(head, ctx):
             ftp_wkg = round(FTP_CURRENT / WEIGHT_KG, 2)
             tgt_wkg = round(FTP_TARGET / WEIGHT_KG, 2)
             fig_wkg = go.Figure(go.Bar(
-                x=pc_df["duration"], y=pc_df["wkg"],
+                x=_pc_axis, y=pc_df["wkg"],
                 marker_color=[C["purple"] if w >= 8.0 else C["red"] if w >= 5.0
                               else C["orange"] if w >= 4.0 else C["yellow"] if w >= 3.5
                               else C["accent"] for w in pc_df["wkg"]],
                 text=[f"{w:.2f}" for w in pc_df["wkg"]],
+                # Same minute ticks as the curve beside it; the hover still
+                # carries the EXACT measured length, so rounding a tick never
+                # costs the reader the real number.
+                customdata=(pc_df["duration"].tolist()
+                            if "duration" in pc_df.columns else None),
+                hovertemplate=("exact duration <b>%{customdata}</b><br>"
+                               "%{y:.2f} W/kg<extra></extra>"
+                               if "duration" in pc_df.columns else None),
                 textposition="outside", opacity=0.85, showlegend=False))
             fig_wkg.add_hline(y=ftp_wkg, line_dash="dot", line_color=C["yellow"])
             fig_wkg.add_hline(y=tgt_wkg, line_dash="dot", line_color=C["green"], opacity=0.4)

@@ -31,6 +31,7 @@ from core.theme import C, H_PAIR, H_STD, MAIN_TYPES, style_figure
 from ml import interval_watts as iw
 from ml import year_over_year as yoy
 from views.intervals_view import _lane_legend
+from views.interval_watts import prescribed_tab
 
 # One colour per DURATION CLASS, fixed by position so the same class is the
 # same colour on every chart on every type. Assigned by hand from the theme
@@ -307,7 +308,10 @@ def render(head, ctx):
         "The first tab is the interval itself: watts of one rep, one length "
         "class at a time, plotted by day. The line shows the average interval "
         "watts across those days. The second tab compares whole training types "
-        "across years. Same type, same length class, never mixed anywhere.",
+        "across years. The third is the coach's own prescribed target watts — "
+        "a target that evolved over the years, kept apart from the measured "
+        "line and never joined to it. Same type, same length class, never "
+        "mixed anywhere.",
     )
 
     # The sidebar range is NOT applied here, on purpose — see the module note.
@@ -318,10 +322,21 @@ def render(head, ctx):
         f"6 months, which would remove every year being compared."
     )
 
-    t_days, t_years = st.tabs([
+    t_days, t_years, t_pres = st.tabs([
         "Intervals by day",
         "Year over year — every measure",
+        "Prescribed — the coach's target",
     ])
+
+    # Written out of screen order, on purpose. The year-over-year tab below
+    # `return`s out of render() whenever a type has no labelled sessions or
+    # fewer than two comparable years — which happens on most choices — and a
+    # return reached BEFORE this block would leave the third tab permanently
+    # empty with no error anywhere. Streamlit tab containers take content in
+    # any order: the label order above decides what the reader sees, not the
+    # order of these `with` blocks.
+    with t_pres:
+        prescribed_tab(iw.prescribed(ctx.df_all))
 
     with t_days:
         _interval_by_day(ctx)
