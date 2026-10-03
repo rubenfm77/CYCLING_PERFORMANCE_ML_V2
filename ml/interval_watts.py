@@ -34,9 +34,11 @@ together. The user's duration rule is carried over: under 90 s the class is not
 subdivided, because at that scale the exact seconds ARE the description, and the
 exact seconds travel with every row.
 
-Below 90 s the class is `under 90s` and fmt_rep() prints e.g. `30s`. From 90 s up
-the class is a range, but the exact length is still printed next to the median so
-a 10:00 and a 10:20 rep are never presented as the same effort.
+Below 90 s the class is `under 90s`. Printing follows the athlete's own rule:
+seconds while an interval lasts less than a minute, minutes from a minute up —
+so fmt_rep() reads `30s` at 30 s and `1:15` at 75 s (exact to the second, and
+in minutes), and from a minute up the exact length still travels next to the
+median so a 10:00 and a 10:20 rep are never presented as the same effort.
 
 A session's own length is still reported per cell (median, and the mix of session
 duration classes) rather than being the bucket, because for FTP work a 3-hour ride
@@ -203,33 +205,41 @@ def rep_class(secs) -> str:
 
 
 def fmt_rep(secs) -> str:
-    """Exact rep length. Seconds under 90 s, then m:ss — never a bare class."""
+    """Exact rep length, in the athlete's rule: seconds under a minute, m:ss
+    from a minute up — never a bare class, never a rounded minute.
+
+    m:ss keeps both halves of what is asked for at once: it reads in MINUTES
+    for anything a minute long or more, and it stays exact to the second, so a
+    19:59 effort never prints as "20 min" on a bar label or a hover. Under a
+    minute the seconds are already the exact and the natural unit, so they are
+    printed bare (`30s`).
+    """
     if secs is None or (isinstance(secs, float) and np.isnan(secs)):
         return "—"
     secs = int(round(float(secs)))
-    if secs < 90:
+    if secs < 60:
         return f"{secs}s"
     m, s = divmod(secs, 60)
     return f"{m}:{s:02d}" if s else f"{m}:00"
 
 
 def fmt_axis_dur(secs) -> str:
-    """Duration-axis label: seconds under 90 s, whole minutes above it.
+    """Duration-axis label: seconds under a minute, whole minutes above it.
 
-    The athlete's rule, asked for directly: the power curve's x-axis must
-    read in minutes, not as `4824 s`. Two things are kept while doing that.
-    The split point is the SAME 90-second one `fmt_rep` uses, so this axis
-    agrees with every other duration on the dashboard. And the minutes are
-    rounded halves-DOWN — the house rule `dur_bucket` and `_dur_label`
-    already use — so an axis tick never disagrees with the class a session
-    is filed under. Exactness is not traded away: the exact measured length
-    stays on the hover and in `duration`; only the tick is rounded, and
-    `axis_labels()` refuses to let two ticks round to the same word.
+    The athlete's rule, asked for directly and twice: a duration reads in
+    SECONDS while it lasts less than a minute and in MINUTES from there up —
+    `4824 s` on a tick is what was rejected. Two things are kept while doing
+    that. The minutes are rounded halves-DOWN — the house rule `dur_bucket`
+    and `_dur_label` already use — so an axis tick never disagrees with the
+    class a session is filed under. Exactness is not traded away: the exact
+    measured length stays on the hover and in `duration`; only the tick is
+    rounded, and `axis_labels()` refuses to let two ticks round to the same
+    word.
     """
     if secs is None or (isinstance(secs, float) and np.isnan(secs)):
         return "—"
     secs = float(secs)
-    if secs < 90:
+    if secs < 60:
         return f"{secs:.0f} s"
     return f"{int(np.ceil(secs / 60.0 - 0.5)):d} min"
 
@@ -246,7 +256,8 @@ def axis_labels(seqs) -> list:
     Two points four seconds apart both become "5 min" and the axis would
     then carry two ticks reading identically — a number nobody can tell
     apart. Those points fall back to m:ss (5:01 / 5:05) so every tick keeps
-    its own name. Seconds under 90 s are already exact and never need it.
+    its own name. Seconds under a minute are already exact and never need
+    it, so those fall back to the exact second count instead.
     """
     vals = [None if (s is None or (isinstance(s, float) and np.isnan(s)))
             else float(s) for s in seqs]
@@ -254,7 +265,7 @@ def axis_labels(seqs) -> list:
     count = {}
     for lab in labs:
         count[lab] = count.get(lab, 0) + 1
-    return [(fmt_rep(v) if (v is not None and count[lab] > 1 and v < 90)
+    return [(fmt_rep(v) if (v is not None and count[lab] > 1 and v < 60)
              else _mss(v) if (v is not None and count[lab] > 1) else lab)
             for v, lab in zip(vals, labs)]
 

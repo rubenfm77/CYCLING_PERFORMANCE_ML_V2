@@ -521,15 +521,16 @@ def quality_gates(sets: pd.DataFrame):
 
 # ── Signature matching across sessions ───────────────────────────────────────
 def _dur_label(secs: float) -> str:
-    """Human duration for protocol labels: seconds under 90 s, WHOLE minutes
-    above (the user rule — no decimals in time, and a 30 s interval is never
-    "0 min"). Halves DOWN, the same class rule as dur_bucket, so the label and
-    the group always agree."""
+    """Human duration for protocol labels: seconds under a minute, WHOLE
+    minutes from a minute up (the user rule — seconds for an interval that
+    lasts less than a minute, minutes for the rest, no decimals in time, and
+    a 30 s interval is never "0 min"). Halves DOWN, the same class rule as
+    dur_bucket, so the label and the group always agree."""
     try:
         s = float(secs)
     except (TypeError, ValueError):
         return "—"
-    if s < 90:
+    if s < 60:
         return f"{s:.0f} s"
     return f"{np.ceil(s / 60.0 - 0.5):.0f} min"
 
@@ -540,9 +541,12 @@ def _sig_label(reps_b: int, secs: float) -> str:
     alone are NOT unique here. Groups are 10-second buckets, so '3 min' is
     shared by six different groups (190 groups collapse to 93 whole-minute
     labels) and two entries in the dropdown would read identically. The
-    seconds disambiguate without putting a decimal back in the minutes."""
+    seconds disambiguate without putting a decimal back in the minutes — and
+    they are appended from ONE MINUTE up, which is where `_dur_label` switches
+    to whole minutes; below a minute the label already carries the exact
+    seconds, so nothing extra is needed."""
     lab = _dur_label(secs)
-    if secs >= 90:
+    if secs >= 60:
         return f"{reps_b} × {lab} · {secs:.0f} s"
     return f"{reps_b} × {lab}"
 

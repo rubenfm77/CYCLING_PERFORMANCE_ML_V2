@@ -113,20 +113,22 @@ SUMMARY_COLUMNS = ["Type", "Duration", "Sets", "Sessions", "First", "Last",
 
 # ── formatting: whole minutes (sub-minute stays in seconds) ─────────────────
 def fmt_min(secs, decimals: int = 0) -> str:
-    """Seconds → human duration. Under 90 s keeps seconds (a 30 s interval is
-    not "0 min" — that is the real-world protocol unit). Everything longer is
-    shown in WHOLE minutes, and by the same halves-DOWN class rule dur_bucket
-    uses, so a printed duration and the group it belongs to can never
-    disagree: 2:59 says "3 min" and lands in "3 min", 3:30 says "3 min" and
-    lands in "3 min" too. decimals=1 restores the old 1-decimal form for
-    audit tables that want the exact measured length."""
+    """Seconds → human duration, in the athlete's rule: SECONDS for an
+    interval shorter than a minute, MINUTES from one minute up. A 30 s
+    interval is not "0 min" — that is the real-world protocol unit — and a
+    75 s one is not printed in seconds either, because it is a minute of
+    work. Everything from a minute up is WHOLE minutes by the same
+    halves-DOWN class rule dur_bucket uses, so a printed duration and the
+    group it belongs to can never disagree: 2:59 says "3 min" and lands in
+    "3 min", 3:30 says "3 min" and lands in "3 min" too. decimals=1 restores
+    the 1-decimal form for audit tables that want the exact measured length."""
     try:
         s = float(secs)
     except (TypeError, ValueError):
         return "—"
     if pd.isna(s):
         return "—"
-    if s < 90:
+    if s < 60:
         return f"{s:.0f} s"
     if decimals <= 0:
         return f"{np.ceil(s / 60.0 - 0.5):.0f} min"

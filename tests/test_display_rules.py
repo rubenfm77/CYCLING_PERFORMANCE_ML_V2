@@ -29,9 +29,12 @@ from ml.type_comparison import fmt_min, fmt_secs, dur_bucket, dur_class_label
 fails = []
 
 # ── rule 1: fmt_min ─────────────────────────────────────────────────────────
-cases = [(30, "30 s"), (60, "60 s"), (89, "89 s"), (90, "1 min"),
-         # 60–89 s keeps seconds on purpose: 75 s is not "1 min", and the
-         # identical-sets group label calls the same value "75 s" too
+# The athlete's rule, stated directly: seconds for an interval that lasts
+# less than a minute, MINUTES for the rest. So 30 s is "30 s", and from 60 s
+# up — including the 60–89 s band that used to print in seconds — the printed
+# duration is the whole-minute class the value is filed under.
+cases = [(30, "30 s"), (59, "59 s"), (60, "1 min"), (75, "1 min"),
+         (89, "1 min"), (90, "1 min"),
 
          (149, "2 min"), (150, "2 min"), (175, "3 min"), (209, "3 min"),
          (210, "3 min"), (211, "4 min"), (302, "5 min"), (181, "3 min"),
@@ -43,8 +46,10 @@ for secs, want in cases:
     assert "." not in got, f"fmt_min({secs}) still has a decimal: {got!r}"
 print("fmt_min: %d cases, no decimals" % len(cases))
 
-# a label must agree with the class rule, or the group and the text disagree
-for secs in np.arange(90, 1500, 7.0):
+# a label must agree with the class rule, or the group and the text disagree.
+# The rule matches dur_bucket from 60 s up (both are ceil(s/60 - 0.5)), so the
+# agreement is checked from exactly there.
+for secs in np.arange(60, 1500, 7.0):
     lab = fmt_min(secs)
     want = dur_class_label(float(dur_bucket(secs)))
     assert lab == want, (f"fmt_min({secs:.0f}) = {lab} but its class is {want}")

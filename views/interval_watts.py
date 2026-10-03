@@ -54,6 +54,7 @@ from core.components import (callout, dataframe, metric_card, page_header,
                              section, show)
 from core.theme import C, H_STD, MAIN_TYPES, style_figure
 from ml import interval_watts as iw
+from ml.type_comparison import fmt_min
 from views.intervals_view import _lane_legend
 
 # One colour per REP LENGTH CLASS, fixed by position so the same class is the
@@ -150,7 +151,7 @@ def _time_figure(daily: pd.DataFrame, tt: str, phys: str, yr) -> go.Figure:
             marker=dict(color=_rep_color(cls), size=9,
                         line=dict(color=C["panel"], width=1)),
             customdata=[[iw.fmt_watts(w), f"n = {int(n):,}",
-                         iw.fmt_rep(r)]
+                         fmt_min(r)]
                         for w, n, r in zip(dcls["med_w"], dcls["n"],
                                            dcls["rep_secs"])],
             connectgaps=False,
@@ -342,6 +343,27 @@ def render(head, ctx):
         _audit_tab(a, cov, P, M)
 
 
+def _durlab(secs) -> str:
+    """One duration, in the athlete's rule: seconds while it lasts less than
+    a minute, minutes from a minute up.
+
+    From a minute up the exact seconds stay in brackets (`14.7 min (880 s)`),
+    because the rule governs the FORM the athlete reads and the earlier
+    standing rule says the exact measured length must never be hidden by a
+    rounded label. Under a minute the seconds are already exact, so nothing
+    is repeated.
+    """
+    try:
+        s = float(secs)
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(s):
+        return "—"
+    if s < 60:
+        return fmt_min(s)
+    return f"{fmt_min(s, 1)} ({s:.0f} s)"
+
+
 def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
                  phys: str | None) -> None:
     """Power-duration law: CP + W' and the power-law exponent, side by side.
@@ -356,17 +378,17 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
     if not pl["ok"]:
         callout("Not enough durations to fit the law",
                 f"{pl['reason']} ({pl['n']} distinct duration(s) of **{tt}**; "
-                f"{iw.MIN_FIT_PTS} needed). Sync more activities or widen the "
-                f"effort selection.", C["yellow"], "\U0001F6A7")
+                f"{iw.MIN_FIT_PTS} needed). Sync more activities, or pick "
+                f"another training type.", C["yellow"], "\U0001F6A7")
         return
-    focus = (f"{n_focus:,} {phys} effort(s) charted above · "
-             if phys and n_focus else "")
+    focus = (f"{n_focus:,} {phys + ' ' if phys else ''}effort(s) charted above · "
+             if n_focus else "")
     st.caption(
         f"Fitted on the BEST watts observed at each distinct duration for "
         f"**{tt}** — every year, every effort, because the law IS the "
         f"relation between watts and duration. "
         f"{pl['n']} distinct durations, "
-        f"{iw.fmt_rep(pl['t_lo'])} to {iw.fmt_rep(pl['t_hi'])}."
+        f"{fmt_min(pl['t_lo'])} to {fmt_min(pl['t_hi'])}."
     )
     pc = st.columns(5)
     with pc[0]:
@@ -381,7 +403,7 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
                     "purple")
     with pc[3]:
         metric_card("Durations fitted", f"{pl['n']}",
-                    f"{iw.fmt_rep(pl['t_lo'])} – {iw.fmt_rep(pl['t_hi'])}",
+                    f"{fmt_min(pl['t_lo'])} – {fmt_min(pl['t_hi'])}",
                     "muted")
     with pc[4]:
         metric_card("n (efforts)", f"{int(len(M_all[M_all['tt'] == tt])):,}",
@@ -391,23 +413,33 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
     fit_frame = _power_law_frame(M_all, tt)
     if fit_frame:
         obs, curve = fit_frame
+        # Duration on the hover, in the athlete's rule — seconds under a
+        # minute, minutes from a minute up — with the exact seconds kept in
+        # brackets there, so a rounded label never hides a measured length.
+        _lab = [_durlab(v) for v in obs["secs"]]
+        _lab_c = [_durlab(v) for v in curve["secs"]]
         fig_l = go.Figure()
         fig_l.add_trace(go.Scatter(
             x=obs["secs"], y=obs["w"], mode="markers",
             name="Best observed",
             marker=dict(size=9, color=C["accent"],
                         line=dict(color=C["panel"], width=1)),
-            hovertemplate="%{x} s · %{y:,.0f} W<extra></extra>"))
+            customdata=_lab,
+            hovertemplate="duration %{customdata} · %{y:,.0f} W<extra></extra>"))
         fig_l.add_trace(go.Scatter(
             x=curve["secs"], y=curve["cp"], mode="lines",
             name=f"CP + W′/t (R²={pl['r2_cp']})",
             line=dict(color=C["yellow"], width=2, dash="dot"),
-            hovertemplate="CP model %{y:,.0f} W<extra></extra>"))
+            customdata=_lab_c,
+            hovertemplate="duration %{customdata} · CP model %{y:,.0f} W"
+                          "<extra></extra>"))
         fig_l.add_trace(go.Scatter(
             x=curve["secs"], y=curve["law"], mode="lines",
             name=f"Power law (R²={pl['r2_law']})",
             line=dict(color=C["purple"], width=2),
-            hovertemplate="power law %{y:,.0f} W<extra></extra>"))
+            customdata=_lab_c,
+            hovertemplate="duration %{customdata} · power law %{y:,.0f} W"
+                          "<extra></extra>"))
         style_figure(
             fig_l,
             f"{tt} — power-duration law: observed bests and both fits"
@@ -415,7 +447,19 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
             f"neither line is extended beyond the fitted range.</sup>",
             H_STD)
         _lane_legend(fig_l, [t.name for t in fig_l.data], min_w=430)
-        fig_l.update_xaxes(title_text="duration (s)", tickformat=",.0f")
+        # Ticks read seconds under a minute and minutes above it — the same
+        # rule as every other duration on the dashboard, never `880 s`. An
+        # axis type can carry 198 distinct durations, so the ticks are a
+        # readable sample of them (first, last, evenly spaced in between)
+        # instead of 198 labels fighting for one line.
+        _vals = list(obs["secs"])
+        _step = int(np.ceil(len(_vals) / 12.0)) if _vals else 1
+        _sel = _vals[::_step]
+        if _vals and _sel[-1] != _vals[-1]:
+            _sel.append(_vals[-1])
+        _ticks = iw.axis_labels(_sel)
+        fig_l.update_xaxes(title_text="duration", tickmode="array",
+                           tickvals=_sel, ticktext=_ticks)
         fig_l.update_yaxes(tickformat=",.0f", rangemode="tozero")
         show(fig_l)
 
@@ -462,7 +506,13 @@ def _law_tab(M: pd.DataFrame):
     labels = {r.tt: f"{r.tt} — {r.n:,} detected effort(s), {int(r.cls)} length class(es)"
               for r in counts.itertuples()}
 
-    c1, c2, c3 = st.columns([2, 1, 1])
+    # Two controls, not three. The FTP / VO2MAX effort filter that used to sit
+    # here said nothing the training type does not already say, and on THIS
+    # page it was worse than redundant: the x-axis is duration, so a 3-minute
+    # effort and a 20-minute effort are two points on one curve, never one
+    # number to average. Nothing here mixes durations anyway — every coverage
+    # row is one rep length class, and the law is fitted across durations.
+    c1, c2 = st.columns([2, 1])
     with c1:
         tt = st.selectbox("Training type", order, index=0,
                           format_func=lambda t: labels[t], key="iw_meas_type",
@@ -474,26 +524,17 @@ def _law_tab(M: pd.DataFrame):
                           help="Only years carrying detected efforts exist here. "
                                "A year with too few efforts per cell will show its "
                                "cells as present-but-thin rather than as a line.")
-    with c3:
-        phys = st.selectbox(
-            "Effort", ["FTP", "VO2MAX"], key="iw_meas_phys",
-            help="FTP = efforts of 10 minutes and longer. VO2MAX = efforts "
-                 "below 10 minutes. The two are never on one chart. Efforts "
-                 "over one minute that stand alone on their day are already "
-                 "discarded as isolated pushes.")
 
-    # Split by physiology first: a 15-minute effort and a 3-minute effort are
-    # never on the same axis, whatever the type selector says. M_all stays
-    # unfiltered: the ley de potencias IS the relation across durations, so it
-    # is fitted on every effort of the type, in every year.
+    # Every effort of the type: the ley de potencias IS the relation across
+    # durations, so it is fitted on every effort of the type, in every year,
+    # and the coverage under it shows one row per rep length class.
     M_all = M
-    M = M[M["phys"] == phys] if "phys" in M.columns else M
 
     cells = iw.measured_cells(M, yr)
     mine = cells[cells["tt"] == tt].sort_values("med_w", ascending=False)
     if not len(mine):
-        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
-                f"effort in {yr}.", C["orange"], "\U0001F6A7")
+        callout("Nothing for this type", f"**{tt}** has no detected effort in "
+                f"{yr}.", C["orange"], "\U0001F6A7")
         _law_section(M_all, tt, 0, None)
         return
 
@@ -502,7 +543,7 @@ def _law_tab(M: pd.DataFrame):
     # describes the coverage tables underneath — never the fit itself.
     M_yr = M[M["year"] == yr] if yr is not None else M
     M_tt = M_yr[M_yr["tt"] == tt]
-    _law_section(M_all, tt, int(len(M_tt)), phys)
+    _law_section(M_all, tt, int(len(M_tt)), None)
 
     # Coverage, so the reader sees the shape of the data the law was fitted on.
     grid = _cells_datable(mine, [yr], "Rep length class")
@@ -538,7 +579,7 @@ def _law_tab(M: pd.DataFrame):
             "Rep length class": r.cls,
             "Detected efforts": f"{int(r.n):,}",
             "Sessions": f"{int(r.sessions):,}",
-            "Typical length": iw.fmt_rep(r.rep_secs),
+            "Typical length": fmt_min(r.rep_secs),
             "Median W": iw.fmt_watts(r.med_w),
             "Middle half": f"{iw.fmt_watts(r.q1_w)}–{iw.fmt_watts(r.q3_w)}",
             "Plotted": "yes" if bool(r.drawable) else f"no (below {iw.MIN_CELL_N})",
@@ -675,7 +716,7 @@ def prescribed_tab(P: pd.DataFrame):
         custom = [[f"{iw.fmt_watts(r.med_w_lo)} W", f"n = {int(r.n):,} session(s)",
                    f"target range up to {iw.fmt_watts(r.med_w_hi)} W",
                    f"middle half: {iw.fmt_watts(r.q1_w_lo)}–{iw.fmt_watts(r.q3_w_lo)} W",
-                   f"typical rep {iw.fmt_rep(r.rep_secs)}",
+                   f"typical rep {fmt_min(r.rep_secs)}",
                    r.dur_mix]
                   for r in g.itertuples()]
         fig.add_trace(go.Scatter(
@@ -736,7 +777,7 @@ def prescribed_tab(P: pd.DataFrame):
             "Rep length class": r.cls,
             "Year": int(r.year),
             "Sessions": f"{int(r.n):,}",
-            "Typical rep": iw.fmt_rep(r.rep_secs),
+            "Typical rep": fmt_min(r.rep_secs),
             "Median target (W)": iw.fmt_watts(r.med_w_lo),
             "Compared with": prev,
             "Sessions then": pn,

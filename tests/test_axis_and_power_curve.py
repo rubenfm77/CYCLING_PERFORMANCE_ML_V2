@@ -90,14 +90,14 @@ labs = iw.axis_labels(pc["secs"])
 assert len(labs) == len(pc), "the axis lost a point"
 assert len(set(labs)) == len(labs), f"two ticks read the same word: {labs}"
 for s, lab in zip(pc["secs"], labs):
-    if s < 90:
-        # the same 90-second split fmt_rep uses everywhere else
+    if s < 60:
+        # the athlete's rule: seconds below a minute, minutes from there up
         assert lab.endswith(" s"), (s, lab)
     else:
         assert lab.endswith("min") or ":" in lab, (
             f"{s} s is still printed in raw seconds as {lab!r}")
 assert not [L for L in labs if L.endswith("s") and L[:-1].isdigit()
-            and float(L[:-1]) >= 90], f"raw seconds above 90 s: {labs}"
+            and float(L[:-1]) >= 60], f"raw seconds above a minute: {labs}"
 # minutes round halves DOWN, the rule dur_bucket/_dur_label file classes by
 import math
 for s, lab in zip(pc["secs"], labs):
@@ -187,8 +187,22 @@ _ticks = [str(t) for t in (_pc_fig.layout.xaxis.ticktext or [])]
 assert _ticks, "the power curve has no tick labels"
 assert _ticks == iw.axis_labels(pc["secs"]), (_ticks, iw.axis_labels(pc["secs"]))
 assert not [t for t in _ticks if t.endswith("s") and t[:-1].isdigit()
-            and float(t[:-1]) >= 90], f"seconds back on the axis: {_ticks}"
+            and float(t[:-1]) >= 60], f"seconds back on the axis: {_ticks}"
 print(f"   PASS  power-curve ticks in minutes: {', '.join(_ticks)}")
+
+# …and the power-duration law on the Power law page answers to the same rule
+# (it used to print `duration (s)` and a hover of `880 s`).
+_law_titles = [t for t in titles[n_fit:n_law] if "power-duration law" in t.lower()]
+if _law_titles:
+    _lf = FIGS[titles.index(_law_titles[0])]
+    _lt = [str(t) for t in (_lf.layout.xaxis.ticktext or [])]
+    assert _lt, "the power-duration law has no tick labels"
+    assert len(set(_lt)) == len(_lt), f"two law ticks read alike: {_lt}"
+    assert not [t for t in _lt if t.endswith("s") and t[:-1].isdigit()
+                and float(t[:-1]) >= 60], f"law axis back in raw seconds: {_lt}"
+    assert str(_lf.layout.xaxis.title.text or "") != "duration (s)", \
+        "the law axis is seconds again"
+    print(f"   PASS  law ticks follow the rule: {', '.join(_lt)}")
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("=" * 74)
