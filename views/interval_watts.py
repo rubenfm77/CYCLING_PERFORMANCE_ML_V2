@@ -707,9 +707,11 @@ def prescribed_tab(P: pd.DataFrame):
     st.caption(
         f"Median of the LOWER end of the wattage range the coach wrote for each "
         f"rep length class, n on every point. A length class is never averaged "
-        f"with another. This series ends at **{last_year}** — see the source "
-        f"callout above; extending it would mean drawing a line where no "
-        f"prescription exists."
+        f"with another. This series ends at **{last_year}** — the two sources "
+        f"never join: these coach comments stop there while the detected "
+        f"efforts begin in 2025, and extending this line would mean drawing "
+        f"where no prescription exists. The numbers behind that wall are on "
+        f"the **Power law** page."
     )
 
     # ── Compared with the previous comparable year ──────────────────────────
