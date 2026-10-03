@@ -783,7 +783,7 @@ def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
     when a day held more than one ride rather than hiding it.
     """
     cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
-            "avg_w", "dur_s", "year"]
+            "day_avg", "avg_w", "dur_s", "year"]
     b = effort_best(df)
     if b is None or not len(b):
         return pd.DataFrame(columns=cols)
@@ -810,6 +810,13 @@ def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
             "w": float(top["w"]),
             "n": 1,
             "n_sessions": int(len(grp)),
+            # The day's own AVERAGE across every interval of this class it
+            # held, kept beside the best one instead of replacing it. It is
+            # what a reader tracks over time ("what did 30 Sep average"),
+            # while the bar stays the hardest effort of the day — and the two
+            # are only equal on a single-session day. Averaged strictly within
+            # one length class, so a 7:30 rep never meets a 20:00 one.
+            "day_avg": float(grp["w"].mean()),
             "avg_w": (float(avg.loc[idxs].mean())
                       if avg is not None and idxs else float("nan")),
             "dur_s": (float(dur.loc[idxs].mean())
@@ -829,7 +836,7 @@ def day_series(df: pd.DataFrame, tt: str, cls: str,
     axis without ever being averaged into one number.
     """
     cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
-            "avg_w", "dur_s", "year"]
+            "day_avg", "avg_w", "dur_s", "year"]
     d = _effort_by_day(df, with_avg)
     if d is None or not len(d):
         return pd.DataFrame(columns=cols)

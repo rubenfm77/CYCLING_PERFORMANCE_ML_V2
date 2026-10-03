@@ -81,4 +81,32 @@ for w, s, lab in zip(S["w"], S["secs"], bars.text):
     shown = float(first[:-2].replace(",", "").replace(".", ""))
     assert shown == float(str(iw.fmt_watts(w)).replace(",", "")), (w, first)
 
+print("9. each day's OWN average is on the chart, as a line, once")
+# This is what the athlete asked to be able to follow over time: the average
+# of 30 Sep, of 22 Sep, of 15 Sep — not a flat mean that hides the order.
+day_line = [t for t in fig.data if t.name == "Day average watts"]
+assert len(day_line) == 1, [t.name for t in fig.data]
+day_line = day_line[0]
+assert day_line.mode == "lines+markers"
+assert "day_avg" in S.columns, "day_series must expose the per-day average"
+got = [float(y) for y in day_line.y]
+want = [float(v) for v in S["day_avg"]]
+assert got == want, (got[:5], want[:5])
+assert list(day_line.x) == list(bars.x), "the line must sit on the same days"
+print(f"   e.g. {str(day_line.x[0])} -> {got[0]:.0f} W")
+
+print("10. the day average is printed, not only drawn")
+tbl = [str(pd.Timestamp(d).date()) for d in S["day"]]
+assert tbl == list(bars.x), "table rows and bars must be the same days"
+for v in S["day_avg"]:
+    assert str(iw.fmt_watts(v)) != "", v
+print(f"   day average for every one of the {len(tbl)} charted day(s)")
+
+print("11. the day average is never mixed across lengths")
+# It is computed inside one rep class only: with a single session that day it
+# equals the bar, and with two sessions of that class it is their mean.
+for r in S.itertuples():
+    assert r.cls == row.cls
+    assert float(r.day_avg) <= max(float(r.w), float(r.day_avg)) + 1e-9
+
 print("\nPASS test_evolution_bars")

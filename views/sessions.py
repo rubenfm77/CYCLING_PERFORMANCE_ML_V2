@@ -7,6 +7,7 @@ import streamlit as st
 from core.components import callout, page_header, section, show
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, H_CARD, HOT_TEMP_C, IF_THRESHOLD,
                         IF_VO2, IF_Z2_MAX, WEIGHT_KG, style_figure)
+from ml import interval_watts as iw
 
 
 def render(head, ctx):
@@ -26,6 +27,26 @@ def render(head, ctx):
                                 "quality_score", "fatigue_state"] if c in df_all.columns]
     recent = df_all[display_cols].tail(20).sort_values("date", ascending=False).copy()
     recent["date"] = recent["date"].dt.strftime("%d %b %Y")
+
+    # The interval the ride actually held, printed next to the ride average.
+    # `power_avg` is the mean over the WHOLE ride, which is why a 2 x 20-minute
+    # FTP session reads as 162 W and says nothing about the work that was done.
+    # The peak meter records the watts sustained over one window AND the length
+    # of that window, so the number a reader wants ("what did 30 Sep average")
+    # exists and is shown. Both columns stay — the two answer different
+    # questions and neither is allowed to stand in for the other.
+    if iw.BEST_W_COL in df_all.columns and iw.BEST_S_COL in df_all.columns:
+        _w = pd.to_numeric(df_all[iw.BEST_W_COL], errors="coerce").to_numpy()
+        _s = pd.to_numeric(df_all[iw.BEST_S_COL], errors="coerce").to_numpy()
+        _iv = {}
+        for idx, wv, sv in zip(df_all.index, _w, _s):
+            _iv[idx] = (f"{iw.fmt_watts(wv)} W · {iw.fmt_rep(sv)}"
+                        if pd.notna(wv) and pd.notna(sv) and float(sv) > 0
+                        else "—")
+        _cols = list(recent.columns)
+        _pos = (_cols.index("power_avg") + 1) if "power_avg" in _cols else len(_cols)
+        recent.insert(_pos, "Interval", [_iv[i] for i in recent.index])
+
     for col in ["tss", "if_score", "power_avg", "duration_h", "hr_avg",
                 "w_per_kg", "elevation", "temp_avg", "quality_score"]:
         if col in recent.columns:
@@ -47,8 +68,22 @@ def render(head, ctx):
             # column here big enough for the separator to earn its place
             "Elev (m)": st.column_config.NumberColumn("Elev (m)", format="localized", help="metres climbed"),
             "Quality": st.column_config.ProgressColumn("Quality", min_value=0, max_value=100, format="%.0f"),
+            "Interval": st.column_config.TextColumn(
+                "Interval", width="medium",
+                help="The watts sustained over this ride's strongest sustained "
+                     "interval (peak meter) and the exact length of that "
+                     "interval. Power (W) beside it is the average over the "
+                     "whole ride — two different questions, both shown, never "
+                     "merged into one number. — where a session carries no "
+                     "peak reading at all."),
         })
-    st.caption("All sessions, ignoring the range filter — so you can always audit what happened.")
+    st.caption(
+        "All sessions, ignoring the range filter — so you can always audit what "
+        "happened. **Power (W)** is the average across the whole ride; "
+        "**Interval** is the watts held over that day's strongest sustained "
+        "effort together with its length — which is the number you track over "
+        "time, and the one a ride average hides."
+    )
 
     # ── Wellness & HRV ─────────────────────────────────────────────────────
     section("💚 Wellness & recovery")

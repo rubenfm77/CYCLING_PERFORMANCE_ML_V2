@@ -97,6 +97,26 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
                           f"avg interval watts {iw.fmt_watts(mean_w)} W<extra></extra>",
         ))
 
+    # The day's OWN average, drawn as a line. Bars are read as comparisons, a
+    # line is read as evolution — "what did 30 Sep and 22 Sep average, and
+    # which way is it going" is a question bars answer badly. One point per
+    # charted day, averaged only inside this length class (a 7:30 rep never
+    # meets a 20:00 one), and never merged into a bar: the bar stays the
+    # hardest effort of the day. Exact value of every point is printed in the
+    # table under the chart, so nothing has to be taken off the geometry.
+    day_avg = (pd.to_numeric(S["day_avg"], errors="coerce")
+               if "day_avg" in getattr(S, "columns", []) else None)
+    if day_avg is not None and day_avg.notna().any():
+        fig.add_trace(go.Scatter(
+            x=x_slots, y=day_avg, mode="lines+markers",
+            name="Day average watts",
+            line=dict(color=C["green"], width=2),
+            marker=dict(size=7, color=C["green"]),
+            connectgaps=False,
+            hovertemplate="<b>%{x}</b><br>"
+                          "day average %{y:.0f} W<extra></extra>",
+        ))
+
     # Cut the axis just under the lowest bar: a zero baseline plus headroom
     # turns 211 -> 244 W into nine near-identical columns, which is exactly
     # when a reader stops seeing the evolution. The floor is printed in the
@@ -118,6 +138,8 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
         f"{tt} — interval watts by day, {cls} class"
         "<br><sup>one equal-width slot per charted day, in date order; the label "
         "above each bar is that interval's watts and its exact length. The "
+        "green line is each day's OWN average watts for this class, drawn so "
+        "the evolution can be read as a line rather than off bar heights. The "
         "dotted line is the average of the interval watts across the charted "
         "days and is never averaged into the bars. The y-axis is cut just under "
         f"the lowest bar rather than starting at zero ({iw.fmt_watts(y_min)} W "
@@ -160,11 +182,13 @@ def _interval_by_day(ctx):
     df = ctx.df_all
     section("\U0001F3AF Intervals by day — watts of the interval")
     st.caption(
-        "**One bar per day: the watts of that day's interval.** The dotted line "
-        "is the average of those interval watts across the charted days, so each "
-        "day can be compared to the average of intervals themselves. One training "
-        "type and one length class at a time, so two different intervals never "
-        "share a bar."
+        "**One bar per day: the watts of that day's interval.** The green line "
+        "is each day's own average watts for this class — the number to follow "
+        "over time, with its exact value printed in the table below. The dotted "
+        "line is the average of the interval watts across the charted days, so "
+        "each day can be compared to the average of intervals themselves. One "
+        "training type and one length class at a time, so two different "
+        "intervals never share a bar."
     )
 
     opts = iw.day_options(df)
@@ -241,7 +265,9 @@ def _interval_by_day(ctx):
         f"{len(S):,} day(s) of **{int(S['n_sessions'].sum()):,}** session(s). "
         f"Each bar is one sustained interval of the {cls} class — its watts, "
         "printed over the bar, with the exact length it was held under them. "
-        "Exact lengths are listed below."
+        "**Day avg** is that day's own average across its intervals of this "
+        "class, which is what the green line plots. Exact lengths are listed "
+        "below."
     )
 
     rows = []
@@ -249,6 +275,7 @@ def _interval_by_day(ctx):
         rows.append({
             "Date": str(pd.Timestamp(r.day).date()),
             "Interval (W)": iw.fmt_watts(r.w),
+            "Day avg (W)": iw.fmt_watts(getattr(r, "day_avg", float("nan"))),
             "Length": iw.fmt_rep(r.secs),
             "Session length": iw.fmt_rep(r.dur_s),
             "Sessions that day": int(r.n_sessions),
