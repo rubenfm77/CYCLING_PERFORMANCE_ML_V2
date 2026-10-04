@@ -135,12 +135,14 @@ def _cells_datable(cells: pd.DataFrame, years, label_col: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _time_figure(daily: pd.DataFrame, tt: str, phys: str, yr) -> go.Figure:
+def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
     """The DATE x-axis figure: one point per day, one line per rep length class.
 
-    Shared by the Interval watts page and the Fitness page, so the Fitness page
-    draws the IDENTICAL chart from the identical data — same colours, same
-    n-hovers, same dotted average, x-axis type "date".
+    Drawn for the Fitness page from the identical data the Interval watts page
+    used to draw — same colours, same n-hovers, same dotted average, x-axis
+    type "date". There is no effort filter to apply here: the rep length class
+    already IS the split, and no class crosses ten minutes, so a long effort
+    and a short one are never on one line.
     """
     fig_t = go.Figure()
     for cls in sorted(daily["cls"].unique()):
@@ -168,7 +170,7 @@ def _time_figure(daily: pd.DataFrame, tt: str, phys: str, yr) -> go.Figure:
     ))
     style_figure(
         fig_t,
-        f"{tt} — {phys} interval watts over time, {yr}"
+        f"{tt} — interval watts over time, {yr}"
         f"<br><sup>x-axis is the date. One line per rep length class, n on every "
         f"point; the dotted line is the average of the charted points. Observed "
         f"history, not a cause.</sup>",
@@ -191,9 +193,14 @@ def fitness_section(df_all: pd.DataFrame) -> None:
     Two of them, both asked for by name: the DATE x-axis "Measured interval
     watts over time" chart, and the power-duration law. Same data (full history
     from df_all, not the sidebar range), same rules as the Interval watts page:
-    one training type at a time, physiology split (FTP ≥ 10 min / VO2MAX below),
-    isolated pushes already discarded by ml.interval_watts.measured(), and the
-    law fitted on every effort of the type in every year.
+    one training type at a time, one line per rep length class, isolated
+    pushes already discarded by ml.interval_watts.measured(), and the law
+    fitted on every effort of the type in every year.
+
+    No FTP / VO2MAX effort filter: it said nothing the training type does not
+    already say, and the class under every line already separates the two
+    physiologies — the classes stop and start at ten minutes, so a 5-minute
+    effort and a 15-minute one are never one number.
     """
     M = iw.measured(df_all)
     if not len(M):
@@ -205,7 +212,12 @@ def fitness_section(df_all: pd.DataFrame) -> None:
     years = sorted(int(y) for y in M["year"].dropna().unique())
     types = sorted(str(t) for t in M["tt"].dropna().unique())
 
-    c1, c2, c3 = st.columns(3)
+    # Two controls, not three. The FTP / VO2MAX effort filter that used to sit
+    # here said nothing the training type does not already say, and every rep
+    # length class on the chart stops and starts at ten minutes (5-10 min is
+    # the last class below it, 10-20 min the first one above), so long and
+    # short efforts are already on separate lines with separate numbers.
+    c1, c2 = st.columns([2, 1])
     with c1:
         tt = st.selectbox(
             "Training type", types, key="fit_iw_type",
@@ -216,42 +228,36 @@ def fitness_section(df_all: pd.DataFrame) -> None:
             "Year", years, index=len(years) - 1, key="fit_iw_year",
             help="The chart below is one year; the power-duration law under it "
                  "is always fitted on every year.")
-    with c3:
-        phys = st.selectbox(
-            "Effort", ["FTP", "VO2MAX"], key="fit_iw_phys",
-            help="FTP = efforts of 10 minutes and longer. VO2MAX = efforts "
-                 "below 10 minutes. The two are never on one chart.")
 
     M_all = M
-    M = M[M["phys"] == phys] if "phys" in M.columns else M
     cells = iw.measured_cells(M, yr)
     mine = cells[cells["tt"] == tt].sort_values("med_w", ascending=False)
 
     section("\U0001F4C8 Measured interval watts over time")
     if not len(mine):
-        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
+        callout("Nothing for this type", f"**{tt}** has no detected "
                 f"effort in {yr}.", C["orange"], "\U0001F6A7")
-        _law_section(M_all, tt, 0, phys)
+        _law_section(M_all, tt, 0, None)
         return
 
     st.caption(
-        f"**{phys} efforts of {tt}, {yr}: one point per day, x-axis is the "
+        f"**Detected efforts of {tt}, {yr}: one point per day, x-axis is the "
         "date.** One series per rep length class; two classes never share a "
         "number. The dotted line is the average of the charted points."
     )
     M_yr = M[M["year"] == yr] if yr is not None else M
     M_tt = M_yr[M_yr["tt"] == tt]
     if not len(M_tt):
-        callout("Nothing for this type", f"**{tt}** has no {phys} detected "
+        callout("Nothing for this type", f"**{tt}** has no detected "
                 f"effort in {yr}.", C["orange"], "\U0001F6A7")
-        _law_section(M_all, tt, 0, phys)
+        _law_section(M_all, tt, 0, None)
         return
 
     daily = (M_tt.groupby(["cls", "date"], as_index=False)
              .agg(med_w=("w", "median"), n=("w", "size"),
                   rep_secs=("secs", "median")))
     daily = daily.sort_values("date")
-    show(_time_figure(daily, tt, phys, yr))
+    show(_time_figure(daily, tt, yr))
     st.caption(
         f"{len(daily):,} day(s), {int(daily['n'].sum()):,} detected effort(s). "
         "Every point carries its n in the hover; the class under each line is "
@@ -259,7 +265,7 @@ def fitness_section(df_all: pd.DataFrame) -> None:
         "3-minute one."
     )
 
-    _law_section(M_all, tt, int(len(M_tt)), phys)
+    _law_section(M_all, tt, int(len(M_tt)), None)
 
 
 def render(head, ctx):
