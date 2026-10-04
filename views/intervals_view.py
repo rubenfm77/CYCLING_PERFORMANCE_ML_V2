@@ -27,7 +27,7 @@ from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, add_signatures,
                               build_sets, fill_peak_efforts,
                               quality_gates,
                               run_duration_evolution, run_set_evolution)
-from ml.type_comparison import (FAMILY_SHORT, dur_class_label, fmt_min,
+from ml.type_comparison import (FAMILY_SHORT, duration_options, fmt_min,
                                 fmt_rest, fmt_secs, intensity_band,
                                 run_type_comparison, series_detail,
                                 series_stats)
@@ -331,7 +331,7 @@ def _family_figure(fam: str, series: list, show_n: int) -> tuple:
 # bodies, so an edit inside ml/type_comparison.py or ml/protocol_reps.py would
 # otherwise keep serving the old numbers for the full TTL. Bump the string
 # whenever those modules change.
-_CODE_TAG = "whole-min-2026-09-25c"
+_CODE_TAG = "rep-cls-2026-10-04a"
 
 
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=8)
@@ -342,8 +342,9 @@ def _type_comparison_cached(sets: pd.DataFrame, code_tag: str = _CODE_TAG
 
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=64)
 def _protocol_view_cached(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
-                          dur_b: float, code_tag: str = _CODE_TAG) -> dict:
-    return run_protocol_view(iv, sets, family, dur_b)
+                          dur_b: float | None, dur_cls: str | None = None,
+                          code_tag: str = _CODE_TAG) -> dict:
+    return run_protocol_view(iv, sets, family, dur_b, dur_cls)
 
 
 # ── quality screen: show what was excluded, never hide it ───────────────────
@@ -715,7 +716,12 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "programmed effort, so finer classes would split one workout into "
         "two fake series; a 30 s rep keeps its real-world 30 s. "
         "Every row of the detail table still shows the exact measured "
-        "length. **The grouping is YOUR training type** — the label the "
+        "length. **The selector at the bottom of this tab then groups those "
+        "whole minutes into the length classes Evolution charts with — "
+        "5-10 min, 10-20 min, 20-30 min — because a 20:00, a 22:00 and a "
+        "24:00 are the same 20-minute effort on that chart; the table above "
+        "keeps them apart, the detail below gathers them.** "
+        "**The grouping is YOUR training type** — the label the "
         "session was filed under (FTP, VO2MAX, BILLAT, AEROBIC BASE …), "
         "not a guess from the rep length; only sessions with no label fall "
         "back to the protocol heuristic (rep length + measured rest) or "
@@ -828,9 +834,9 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         g = res["sets"][res["sets"]["family"] == f]
         if not len(g):
             continue
-        nd, nb = int(g["date"].nunique()), int(g["dur_b"].nunique())
-        base = (f"{FAMILY_SHORT.get(f, f)} · {nd} sessions · {nb} duration"
-                f"{'s' if nb > 1 else ''}")
+        nd, nb = int(g["date"].nunique()), int(g["dur_cls"].nunique())
+        base = (f"{FAMILY_SHORT.get(f, f)} · {nd} sessions · {nb} length "
+                f"class{'es' if nb > 1 else ''}")
         lab, k = base, 2
         while lab in fam_lab:
             lab, k = f"{base} ({k})", k + 1
@@ -839,28 +845,29 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                               key="iv_type_fam")
     fam = fam_lab[fam_choice]
     gf = res["sets"][res["sets"]["family"] == fam]
-    dur_lab = {}
-    for d in sorted(gf["dur_b"].unique()):
-        g = gf[np.isclose(gf["dur_b"], d)]
-        dur_lab[f"{dur_class_label(d)} · {int(g['date'].nunique())} sessions "
-                f"· {len(g)} sets"] = float(d)
+    # The options are Evolution's rep-length bands, NOT whole minutes: "20 min"
+    # used to hold only the sessions that read exactly 20:00, while the same
+    # work ridden as a 21:00, 22:00 or 24:00 (the peak meter's window for a
+    # 20-minute effort) was filed under its own one-session option and read as
+    # lost. One criterion, so one session list on both pages.
+    dur_lab = duration_options(gf)
     dur_choice = st.selectbox("2 · Duration class — the length of ONE "
                               "interval", list(dur_lab), key="iv_type_dur")
-    db = dur_lab[dur_choice]
+    cls = dur_lab[dur_choice]
     fam_name = FAMILY_SHORT.get(fam, fam)
-    st.caption(f"**{fam_name} at {dur_class_label(db)}** — a "
-               f"{dur_class_label(db)} interval is the only thing ever "
-               f"compared with a {dur_class_label(db)} interval. No other "
+    st.caption(f"**{fam_name} at {cls}** — a {cls} interval is the only "
+               f"thing ever compared with a {cls} interval. No other "
                f"training type, no other duration class, no workout-average "
-               f"substitution.")
+               f"substitution. Same classes as the Evolution day chart: "
+               f"every day it draws for this class is a session here too.")
 
-    pv = _protocol_view_cached(iv_full, res["sets"], fam, db)
+    pv = _protocol_view_cached(iv_full, res["sets"], fam, None, cls)
     if not pv.get("ok"):
         callout("No intervals for that series", pv.get("reason", "—"),
                 C["yellow"], icon="⏸️")
         return
     sess, bars, tr = pv["sessions"], pv["bars"], (pv.get("trend") or {})
-    stt = series_stats(res["sets"], fam, db)
+    stt = series_stats(res["sets"], fam, dur_cls=cls)
     slope, ci = tr.get("slope_robust", np.nan), tr.get("ci", np.nan)
     clear = (not np.isnan(ci)) and abs(slope) > ci and abs(slope) >= 1.0
     n_sets = int(pd.to_numeric(sess["sets"], errors="coerce")
@@ -943,7 +950,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         fig = _rep_bar_figure(pv)
         style_figure(
             fig,
-            f"{fam_name} · {dur_class_label(db)} — individual intervals, "
+            f"{fam_name} · {cls} — individual intervals, "
             f"session by session", H_STD)
         # after style_figure: it owns the margins the legend lane sits in
         _lane_legend(fig, ["Individual interval (avg W)", "Session average"],
@@ -970,7 +977,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     fig = _session_trend_figure(pv, on_temp, on_tsb)
     style_figure(
         fig,
-        f"{fam_name} · {dur_class_label(db)} — session average watts, "
+        f"{fam_name} · {cls} — session average watts, "
         f"{pv['n_sessions']} sessions", H_STD)
     # after style_figure: it owns the margins the legend lane sits in. Only an
     # explicit showlegend=False hides a trace — Plotly leaves the attribute
@@ -995,7 +1002,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                      f"length, different recovery, so part of that spread is "
                      f"coaching choice rather than fitness.")
     callout("Plain reading",
-            f"**{fam_name} at {dur_class_label(db)}**: {direction}. "
+            f"**{fam_name} at {cls}**: {direction}. "
             f"Session average {tr.get('first', float('nan')):.0f} W → "
             f"{tr.get('last', float('nan')):.0f} W "
             f"({tr.get('last', 0) - tr.get('first', 0):+.0f} W), best "
@@ -1021,7 +1028,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                 "HOW HARD it was actually ridden.",
                 C["yellow"], icon="🎚️")
 
-    st.markdown(f"**Every session of {fam_name} at {dur_class_label(db)}:**")
+    st.markdown(f"**Every session of {fam_name} at {cls}:**")
     dataframe(_session_table(sess), height=380)
     if len(bars):
         with st.expander(f"📋 All {pv['n_reps']} individual intervals",
@@ -1029,7 +1036,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
             dataframe(_rep_table(bars), height=460)
     with st.expander(f"📋 The {stt['n']} sets behind them — measured rest, "
                      f"IF, load", expanded=False):
-        dataframe(series_detail(res["sets"], fam, db), height=420)
+        dataframe(series_detail(res["sets"], fam, dur_cls=cls), height=420)
 
 
 # ── Section 1 tab A: identical sets over time ────────────────────────────────

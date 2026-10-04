@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from ml.set_evolution import DETECTED_SRC
-from ml.type_comparison import robust_fit
+from ml.type_comparison import robust_fit, series_sel
 
 MIN_TREND_SESSIONS = 3        # sessions needed before a trend line is drawn
 SLOT_WIDTH = 0.86             # fraction of a date slot its bars may occupy
@@ -294,13 +294,18 @@ def _carry_sessions(sess: pd.DataFrame, left: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
-                      dur_b: float) -> dict:
+                      dur_b: float | None = None,
+                      dur_cls: str | None = None) -> dict:
     """All interval-level evidence for ONE (training type × duration) series.
+
+    `dur_b` selects a whole-minute duration; `dur_cls` selects a rep-length
+    class ("20-30 min"), the criterion Evolution draws its day chart with —
+    exactly one of the two is used (ml.type_comparison.series_sel), so the
+    sessions listed here and the days charted there are the same set.
 
     Returns bars (one row per individual interval), sessions (one row per
     session, with that session's average watts) and the trend fit."""
-    sel = sets[(sets["family"] == family) &
-               (np.isclose(sets["dur_b"], dur_b))].copy()
+    sel = series_sel(sets, family, dur_b, dur_cls).copy()
     if not len(sel):
         return {"ok": False, "reason": "No sets in that series."}
 

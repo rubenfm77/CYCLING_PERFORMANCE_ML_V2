@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 
 from core.theme import BLANK_TYPE_TOKENS
+from ml.interval_watts import REP_ORDER, rep_class
 from src.config import MAIN_TYPES
 
 # Duration CLASSES = the length of ONE interval (a rep), rounded to whole
@@ -183,6 +184,34 @@ def dur_class_label(dur_b: float) -> str:
     return f"{b:.0f} min"
 
 
+def duration_options(g: pd.DataFrame) -> dict:
+    """{picker label: length class} for ONE training type's detail chart.
+
+    The options are the rep-length classes of `ml.interval_watts.REP_ORDER`
+    — the very classes the Evolution day chart and the Fitness class lines
+    use — in ascending order, each carrying its own session and set counts.
+    Whole-minute durations are deliberately NOT offered here: "20 min" held
+    only the four sessions that happened to read 20:00 while the athlete's
+    other 20-minute work (a 21:00, a 22:00, a 24:00) was filed under its own
+    single-session option and read as lost.
+
+    Nothing is dropped: a class outside REP_ORDER (an unparseable length,
+    "unknown") still gets its own entry at the end rather than vanishing
+    from the picker.
+    """
+    if g is None or not len(g) or "dur_cls" not in g.columns:
+        return {}
+    out = {}
+    classes = [c for c in REP_ORDER if (g["dur_cls"] == c).any()]
+    classes += sorted(set(g["dur_cls"]) - set(classes))
+    for cls in classes:
+        sub = g[g["dur_cls"] == cls]
+        n_d, n_s = int(sub["date"].nunique()), len(sub)
+        out[f"{cls} · {n_d} session{'' if n_d == 1 else 's'} · "
+            f"{n_s} set{'' if n_s == 1 else 's'}"] = cls
+    return out
+
+
 # ── family + duration + intensity-band assignment ────────────────────────────
 # How the work was Ridden, judged from intervals.icu's intensity factor
 # (IF = % of the rider's FTP): a "3-min set" ridden at 85 % IF is a threshold
@@ -256,6 +285,16 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
     s["dur_b"] = [dur_bucket(x) for x in
                   pd.to_numeric(s["rep_secs"], errors="coerce")]
     s["dur_label"] = [dur_class_label(b) for b in s["dur_b"]]
+    # The rep-LENGTH class, the criterion the Evolution day chart and the
+    # Fitness class lines draw with ("20-30 min" holds 20:00 … 26:00, so a
+    # session whose peak meter reads 22:00 is still the athlete's 20-minute
+    # work). `dur_b` above stays whole-minute for the comparison table — a
+    # 30 s rep is never merged with an 80 s one — but the detail at the
+    # bottom of the Intervals page is selected with this class, so both
+    # pages chart the same days for the same work instead of the Intervals
+    # page losing every session that did not land on a whole minute.
+    s["dur_cls"] = [rep_class(x) for x in
+                    pd.to_numeric(s["rep_secs"], errors="coerce")]
     flags = (s["q_flag"].fillna("").astype(str)
              if "q_flag" in s.columns else pd.Series("", index=s.index))
     s["if_band"] = [
@@ -501,9 +540,31 @@ def type_summary(s: pd.DataFrame, sess_by_series: dict | None = None) -> pd.Data
 
 
 # ── one selected series: full detail + trend ─────────────────────────────────
-def series_detail(s: pd.DataFrame, family: str, dur_b: float) -> pd.DataFrame:
-    g = s[(s["family"] == family) &
-          (np.isclose(s["dur_b"], dur_b))].sort_values("date")
+def series_sel(s: pd.DataFrame, family: str, dur_b=None,
+               dur_cls: str | None = None) -> pd.DataFrame:
+    """The rows of ONE series: training type × duration, by ONE criterion.
+
+    `dur_b` is the whole-minute class of the comparison table (an 8-minute
+    set never meets a 20-minute one). `dur_cls` is the rep-length class the
+    Evolution day chart draws with ("20-30 min" spans 20:00 to 26:00). The
+    detail at the bottom of the Intervals page selects with `dur_cls`, so
+    the same criterion produces the same days on both pages. Exactly one of
+    the two is honoured — never a blend of the two.
+    """
+    if dur_cls is None and dur_b is None:
+        raise ValueError("series_sel needs dur_b or dur_cls")
+    if dur_cls is not None and "dur_cls" not in s.columns:
+        s = s.assign(dur_cls=[rep_class(x) for x in
+                              pd.to_numeric(s["rep_secs"], errors="coerce")])
+    m = s["family"] == family
+    m = m & (s["dur_cls"] == dur_cls) if dur_cls is not None \
+        else m & np.isclose(s["dur_b"], dur_b)
+    return s[m]
+
+
+def series_detail(s: pd.DataFrame, family: str, dur_b=None,
+                  dur_cls: str | None = None) -> pd.DataFrame:
+    g = series_sel(s, family, dur_b, dur_cls).sort_values("date")
     if not len(g):
         return g
     multi = int(g["reps"].median()) >= 2
@@ -526,8 +587,9 @@ def series_detail(s: pd.DataFrame, family: str, dur_b: float) -> pd.DataFrame:
     return tbl.iloc[::-1]      # newest first
 
 
-def series_stats(s: pd.DataFrame, family: str, dur_b: float) -> dict:
-    g = s[(s["family"] == family) & (np.isclose(s["dur_b"], dur_b))]
+def series_stats(s: pd.DataFrame, family: str, dur_b=None,
+                 dur_cls: str | None = None) -> dict:
+    g = series_sel(s, family, dur_b, dur_cls)
     g = g.sort_values("date").reset_index(drop=True)
     n = len(g)
     sess = session_frame(g)
