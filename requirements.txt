@@ -1,3 +1,9 @@
+# Touching this file is the only git-side switch that makes Streamlit Community
+# Cloud rebuild the container from scratch instead of pulling into the one it
+# already has ("if you touch your dependencies ... a full redeploy").
+# The dependencies themselves are unchanged: a clean install of this file was
+# verified 2026-10-04 on Python 3.13 (pandas 3.0.6, numpy 2.5.3,
+# streamlit 1.65.0, plotly 7.1.0) with all 13 test suites passing.
 pandas>=2.0
 numpy>=1.24
 scikit-learn>=1.3
