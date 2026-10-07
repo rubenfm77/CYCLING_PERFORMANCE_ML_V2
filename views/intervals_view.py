@@ -23,7 +23,8 @@ from ml.composition_intervals import run_composition
 from ml.exertion_forecast import metric_counts, run_exertion_forecast
 from ml.interval_forecast import run_band_forecast
 from ml.protocol_reps import run_protocol_view
-from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, add_signatures,
+from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, REBUILD_SRC,
+                              add_signatures,
                               build_sets, fill_peak_efforts,
                               quality_gates,
                               run_duration_evolution, run_set_evolution)
@@ -59,29 +60,47 @@ def _add_fan(fig: go.Figure, path: pd.DataFrame, rgb: str = ACCENT_RGB) -> None:
                              line=dict(color=f"rgba({rgb},1)", width=3.5)))
 
 
-def _peak_disclosure(n_peak: int) -> None:
-    """Say which sets came from the peak meter, before any chart uses them.
+def _peak_disclosure(sets) -> None:
+    """Say which sets came from a source other than the detector, before any
+    chart uses them.
 
-    The detector and the peak meter are two sources for the same ride, and a
-    chart that quietly used both would be a splice. The count is stated, the
-    rule that keeps the two from ever describing the same effort is stated,
-    and the Source column on every set row keeps saying it afterwards.
+    The detector, the peak meter and the rebuild are three ways of describing
+    the same ride, and a chart that quietly used all three would be a splice.
+    Each count is stated with the rule that keeps the sources from ever
+    describing the same effort, and the Source column on every set row keeps
+    saying it afterwards.
     """
-    if n_peak <= 0:
+    if sets is None or not len(sets) or "Source" not in sets.columns:
         return
+    n_peak = int((sets["Source"] == PEAK_SRC).sum())
+    n_reb = int((sets["Source"] == REBUILD_SRC).sum())
+    if not n_peak and not n_reb:
+        return
+    bits = []
+    if n_peak:
+        bits.append(
+            f"**{n_peak}** read straight off the peak-power meter"
+        )
+    if n_reb:
+        bits.append(
+            f"**{n_reb}** rebuilt from the detector's own fragments — one row "
+            f"per whole effort the segmenter had cut into pieces, which is "
+            f"how a session that rode two 20-minute intervals shows two rows "
+            f"instead of the meter's single window"
+        )
     st.caption(
-        f"**{n_peak} set{'s' if n_peak != 1 else ''} on this page come from "
-        "the peak-power meter, not from the interval detector.** The detector "
-        "segments a ride by power and cadence, so it cuts sustained work into "
-        "pieces: on 15 Sep 2026 its longest row for that FTP session was "
-        "8 min 05 s, while Intervals.icu's peak meter holds 231 W for 20:00 — "
-        "which is why every 20-minute session shows on Evolution and none of "
-        "them were here. A reading is added only for an effort of 10 min or "
+        "From a source other than the detector: "
+        + " and ".join(bits)
+        + ". The detector segments a ride by power and cadence, so it cuts "
+        "sustained work into pieces: on 15 Sep 2026 its longest row for that "
+        "FTP session was 8 min 05 s, while Intervals.icu's peak meter holds "
+        "231 W for 20:00. A row is added only for an effort of 10 min or "
         "longer where that ride has **no** detected set within two minutes of "
-        "it **and** none in the same whole-minute duration class, so one "
-        "effort is never counted twice; it enters as a single-rep set (one "
-        "held window, no rest figure), and the **Source** column of the detail "
-        "table says which source reported every row."
+        "it **and** none in the same whole-minute duration class, and only "
+        "where the meter's own window vouches for the effort — so one effort "
+        "is never counted twice. Each enters as a single-rep set (no rest "
+        "figure), and the **Source** column of the detail table says which "
+        "source reported every row."
     )
 
 
@@ -733,12 +752,12 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "sub-threshold rather than quietly counted as VO₂ work."
     )
     sets = build_sets(iv_full, acts, df_all)
-    sets, n_peak = fill_peak_efforts(sets, df_all)
+    sets, _ = fill_peak_efforts(sets, df_all, iv=iv_full)
     if len(sets) < 3:
         callout("Not enough sets", "Fewer than 3 sets in the cached history "
                 "— sync more activities first.", C["yellow"], icon="⏸️")
         return
-    _peak_disclosure(n_peak)
+    _peak_disclosure(sets)
     sets, _ = add_signatures(sets)
     res = _type_comparison_cached(sets)
     if not res.get("ok"):
@@ -932,17 +951,30 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     # 4a — every individual interval, one bar each, grouped per session
     if len(bars):
         # which instrument reported each bar, stated before the chart uses it
-        n_meter = (int((bars["src"] == PEAK_SRC).sum())
-                   if "src" in bars.columns else 0)
+        _src = bars["src"] if "src" in bars.columns else pd.Series(dtype=object)
+        n_meter, n_reb = int((_src == PEAK_SRC).sum()), int(
+            (_src == REBUILD_SRC).sum())
+        _who = []
+        if n_meter:
+            _who.append(
+                f"{n_meter} are the peak-power meter's held window — one "
+                f"effort with no NP, HR, IF or cadence in that source"
+            )
+        if n_reb:
+            _who.append(
+                f"{n_reb} are whole efforts rebuilt from the detector's own "
+                f"fragments — its pieces joined across breaks under 1:30, one "
+                f"bar per effort ridden rather than the meter's single window"
+            )
         st.markdown(f"**Every interval of every session — {pv['n_reps']} "
                     f"bars, nothing smoothed. The orange dotted line across "
                     f"each day is that session's AVERAGE watts; ◇ marks it "
                     f"and prints the number.** "
-                    + (f"{n_meter} of these bars are the peak-power meter's "
-                       f"held window — one effort with no NP, HR, IF or "
-                       f"cadence in that source; hover the bar or read the "
-                       f"Source column to see which instrument reported it. "
-                       if n_meter else "")
+                    + ("Bars from the long-effort sources: "
+                       + "; ".join(_who)
+                       + ". Hover the bar or read the Source column to see "
+                         "which instrument reported it. "
+                       if _who else "")
                     + ("Where a session holds several reps, rep 1 still "
                        "carries the power ramp, so the fade above compares "
                        "the opening reps 2–3 with the closing two:"
@@ -1058,7 +1090,7 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "rep length + measured rest, always shown next to the raw values."
     )
     sets = build_sets(iv_full, acts, df_all)
-    sets, n_peak = fill_peak_efforts(sets, df_all)
+    sets, _ = fill_peak_efforts(sets, df_all, iv=iv_full)
     if len(sets) < 3:
         callout("Not enough sets",
                 "Fewer than 3 sets in the cached history — sync more "
@@ -1085,7 +1117,7 @@ def _render_sets(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
               f" further sets are flagged for an unusable intensity field and "
               f"kept. Every excluded row is listed in the training-types tab.",
             C["yellow"], icon="🧹")
-    _peak_disclosure(n_peak)
+    _peak_disclosure(sets)
     sets, clusters = add_signatures(sets)
 
     sig_of, labels = {}, []

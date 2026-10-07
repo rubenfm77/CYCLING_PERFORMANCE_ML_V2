@@ -27,6 +27,7 @@ import streamlit as st
 
 from core.components import (callout, dataframe, legend, metric_card, page_header,
                              section, show)
+from core.interval_data import read_intervals
 from core.theme import C, H_PAIR, H_STD, MAIN_TYPES, style_figure
 from ml import interval_watts as iw
 from ml import year_over_year as yoy
@@ -57,6 +58,23 @@ def _present(cells: pd.DataFrame) -> str:
     return f"·{n}" if n else "—"
 
 
+def _slot_labels(days) -> list:
+    """One x slot per BAR: its date, indexed when the day drew more than one.
+
+    Two bars of the same day must sit side by side rather than on top of each
+    other, and the axis may still only be a date or a year — so the second bar
+    of 30 Sep 2026 reads "2026-09-30·2": the same date, marked as that day's
+    second bar. The date underneath is never replaced by a length.
+    """
+    out, seen = [], {}
+    for d in days:
+        key = str(pd.Timestamp(d).date())
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        out.append(key if n == 0 else f"{key}·{n + 1}")
+    return out
+
+
 def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
     """Bars of interval watts by day — watts and exact length on every bar.
 
@@ -64,12 +82,14 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
     asserted without a Streamlit session: everything a reader must not have to
     estimate from geometry is printed on the chart itself.
     """
-    # Equal-width slot per day: on a true date axis a 7-day gap gets one thin
-    # sliver and the eye can't read it. Every charted day gets the same width,
-    # in chronological order, with its date printed under the bar.
-    x_slots = [str(pd.Timestamp(d).date()) for d in S["day"]]
+    # Equal-width slot per bar: on a true date axis a 7-day gap gets one thin
+    # sliver and the eye can't read it. Every charted bar gets the same width,
+    # in chronological order, with its date printed under it.
+    x_slots = _slot_labels(S["day"])
 
     fig = go.Figure()
+    pieces = [str(getattr(r, "pieces", "") or "") for r in S.itertuples()]
+    who = [str(getattr(r, "source", "") or "") for r in S.itertuples()]
     fig.add_trace(go.Bar(
         x=x_slots, y=S["w"], name="Interval watts",
         marker_color=C["accent"], opacity=0.9,
@@ -80,11 +100,14 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
               for w, s in zip(S["w"], S["secs"])],
         textposition="outside", textfont=dict(color=C["muted"], size=10),
         customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
-                     iw.fmt_rep(r.dur_s)]
-                    for r in S.itertuples()],
+                     iw.fmt_rep(r.dur_s), w,
+                     (p or "—")]
+                    for r, w, p in zip(S.itertuples(), who, pieces)],
         hovertemplate="<b>%{x}</b><br>"
                       "interval %{customdata[1]} W over %{customdata[0]}<br>"
-                      "session length %{customdata[2]}<extra></extra>",
+                      "session length %{customdata[2]}<br>"
+                      "source %{customdata[3]}<br>"
+                      "pieces %{customdata[4]}<extra></extra>",
     ))
     # Line showing average interval watts across days for comparison
     if len(S) > 0:
@@ -101,9 +124,9 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
     # The day's OWN average, drawn as a line. Bars are read as comparisons, a
     # line is read as evolution — "what did 30 Sep and 22 Sep average, and
     # which way is it going" is a question bars answer badly. One point per
-    # charted day, averaged only inside this length class (a 7:30 rep never
+    # charted bar, averaged only inside this length class (a 7:30 rep never
     # meets a 20:00 one), and never merged into a bar: the bar stays the
-    # hardest effort of the day. Exact value of every point is printed in the
+    # effort actually ridden. Exact value of every point is printed in the
     # table under the chart, so nothing has to be taken off the geometry.
     day_avg = (pd.to_numeric(S["day_avg"], errors="coerce")
                if "day_avg" in getattr(S, "columns", []) else None)
@@ -137,16 +160,19 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
     style_figure(
         fig,
         f"{tt} — interval watts by day, {cls} class"
-        "<br><sup>one equal-width slot per charted day, in date order; the label "
-        "above each bar is that interval's watts and its exact length. The "
-        "green line is each day's OWN average watts for this class, drawn so "
-        "the evolution can be read as a line rather than off bar heights. The "
-        "dotted line is the average of the interval watts across the charted "
-        "days and is never averaged into the bars. The y-axis is cut just under "
+        "<br><sup>one equal-width slot per charted bar, in date order; a day "
+        "that rode two efforts of this class draws two bars, indexed under "
+        "the same date. The label above each bar is that interval's watts and "
+        "its exact length. The green line is each day's OWN average watts for "
+        "this class, drawn so the evolution can be read as a line rather than "
+        "off bar heights. The dotted line is the average of the interval watts "
+        "across the charted bars and is never averaged into the bars. The "
+        "y-axis is cut just under "
         f"the lowest bar rather than starting at zero ({iw.fmt_watts(y_min)} W "
         "is the floor), so day-to-day differences stay visible — read the "
         "printed watts, not the ratio of two bar heights. Where two sessions "
-        "share a day the harder one is shown. Observed history, not a cause."
+        "share a day the harder one is shown; one session that made two "
+        "efforts of this class shows both. Observed history, not a cause."
         "</sup>",
         H_STD,
     )
@@ -166,43 +192,63 @@ def _interval_by_day(ctx):
     exists only so the two can be read against each other. The line is never
     averaged into a bar and never substituted for one.
 
-    Source is the peak-meter reading (`icu_pm_ftp_watts` with its own
-    `icu_pm_ftp_secs`), not the auto-detected `interval_summary`. Measured on
-    this file the detector reports what is UNUSUAL inside a ride, so on a real
-    interval session it fills with 10-second accelerations and 1-5 minute rolling
-    sections, and exactly one detected effort in the whole file sits between 19
-    and 21 minutes. The peak-meter has a reading on every FTP session of 2026
-    and reports the length it was sustained over.
+    TWO sources, both long-effort readings, and neither is the auto-detected
+    `interval_summary` (measured on this file, that reports what is UNUSUAL
+    inside a ride — on a real interval session it fills with 10-second
+    accelerations and 1-5 minute rolling sections, and exactly one detected
+    effort in the whole file sits between 19 and 21 minutes):
 
-    Because that length varies from 5 to 55 minutes across sessions, one type is
+      * the peak-meter reading (`icu_pm_ftp_watts` with its own
+        `icu_pm_ftp_secs`), which has a reading on every FTP session of 2026
+        and reports the length it was sustained over — one window per ride;
+      * the detector's own fragments, put back together where that meter
+        window vouches for the effort (`ml.interval_watts.rebuilt_efforts`).
+        This is what puts the SECOND 20-minute interval of 30 Sep 2026 on the
+        chart: the segmenter cut the two efforts into 158/285/384/180 s and
+        882/324 s pieces, and one meter window cannot show two rides of the
+        same length. Every bar's hover and the table's Source column say
+        which of the two reported it.
+
+    Because the length varies from 5 to 55 minutes across sessions, one type is
     NOT enough on its own: a 258 W effort over 8:00 and a 188 W effort over
     26:00 are not the same thing. So a length class is required too, and both
     the watts and the exact length are written on every bar, because the bar
     geometry alone cannot carry a 211 -> 244 W difference the eye can trust.
     """
     df = ctx.df_all
+    # The interval cache, read but never synced: this page does no network
+    # work. Without it (or without the file) the chart falls back to the
+    # meter's own windows, which is what it drew before the rebuild existed.
+    try:
+        iv = read_intervals("2019-01-01T00:00:00")
+    except Exception:
+        iv = None
     section("\U0001F3AF Intervals by day — watts of the interval")
     st.caption(
-        "**One bar per day: the watts of that day's interval.** The green line "
+        "**One bar per effort: the watts of that interval.** A day that rode "
+        "two intervals of this class draws two bars under the same date (the "
+        "second is indexed `·2`), because one meter window per ride cannot "
+        "show two. The green line "
         "is each day's own average watts for this class — the number to follow "
         "over time, with its exact value printed in the table below. The dotted "
-        "line is the average of the interval watts across the charted days, so "
+        "line is the average of the interval watts across the charted bars, so "
         "each day can be compared to the average of intervals themselves. One "
         "training type and one length class at a time, so two different "
         "intervals never share a bar."
     )
 
-    opts = iw.day_options(df)
+    opts = iw.day_options(df, iv=iv)
     if opts is None or not len(opts):
         callout("No interval records",
                 "This file carries no sustained-effort reading, so there is no "
                 "interval to chart by day.", C["red"], "⚠️")
         return
 
-    tsum = (opts.groupby("tt", as_index=False)[["days", "sessions"]].sum()
-            .sort_values("days", ascending=False))
+    tsum = (opts.groupby("tt", as_index=False)[["days", "bars", "sessions"]]
+            .sum().sort_values("bars", ascending=False))
     t_opts = tsum["tt"].tolist()
     t_lab = {r.tt: f"{r.tt} — {int(r.days):,} day(s), "
+                  f"{int(r.bars):,} bar(s), "
                   f"{int(r.sessions):,} session(s)"
            for r in tsum.itertuples()}
 
@@ -218,12 +264,14 @@ def _interval_by_day(ctx):
         tt = st.selectbox("Training type", t_opts, index=0,
                           format_func=lambda t: t_lab[t], key="evo_day_type",
                           help="One type at a time. Days are the calendar days "
-                               "the chart will draw; sessions counts the rides "
-                               "behind them, which is higher where one day held "
-                               "more than one.")
+                               "the chart will draw, bars are the bars it draws "
+                               "(two where one day rode two efforts of a class), "
+                               "and sessions counts the rides behind them, which "
+                               "is higher where one day held more than one.")
     c_opts, csub = _cls_list(tt)
     with c2:
         c_lab = {r.cls: f"{r.cls} — {int(r.days):,} day(s), "
+                        f"{int(r.bars):,} bar(s), "
                         f"median {iw.fmt_watts(r.med_w)} W over "
                         f"{iw.fmt_rep(r.med_secs)}"
                for r in csub.itertuples()}
@@ -238,37 +286,47 @@ def _interval_by_day(ctx):
                     C["orange"], "⚠️")
             return
 
-    S = iw.day_series(df, tt, cls)
+    S = iw.day_series(df, tt, cls, iv=iv)
     if S is None or not len(S):
         callout("Nothing to chart", f"No {tt} day carries a {cls} interval.",
                 C["orange"], "⚠️")
         return
 
     has_avg = bool(S["avg_w"].notna().any())
+    n_days = int(S["day"].nunique())
+    n_rides = int(S.drop_duplicates("day")["n_sessions"].sum())
     mc = st.columns(4)
     with mc[0]:
-        metric_card("Days charted", f"{len(S):,}",
+        metric_card("Efforts charted", f"{len(S):,}",
+                    f"{n_days:,} day(s) · "
                     f"{S['day'].min().date()} → {S['day'].max().date()}", "muted")
     with mc[1]:
         metric_card("Median interval", f"{iw.fmt_watts(S['w'].median())} W",
                     f"{iw.fmt_rep(S['secs'].median())} efforts", "accent")
     with mc[2]:
-        metric_card("Best day", f"{iw.fmt_watts(S['w'].max())} W",
+        metric_card("Best effort", f"{iw.fmt_watts(S['w'].max())} W",
                     str(S.loc[S['w'].idxmax(), "day"].date()), "green")
     with mc[3]:
         metric_card("Avg interval watts",
                     f"{iw.fmt_watts(S['w'].mean())} W",
-                    "mean of interval watts across days", "muted")
+                    "mean of the bars charted", "muted")
 
     show(_day_figure(S, tt, cls))
 
+    n_reb = int((S["source"] == iw.REBUILD_SRC).sum()) if "source" in S else 0
     st.caption(
-        f"{len(S):,} day(s) of **{int(S['n_sessions'].sum()):,}** session(s). "
+        f"{len(S):,} bar(s) across {n_days:,} day(s) of "
+        f"**{n_rides:,}** session(s). "
         f"Each bar is one sustained interval of the {cls} class — its watts, "
         "printed over the bar, with the exact length it was held under them. "
-        "**Day avg** is that day's own average across its intervals of this "
-        "class, which is what the green line plots. Exact lengths are listed "
-        "below."
+        + (f"{n_reb} of them are efforts rebuilt from the detector's "
+           f"fragments — the pieces the segmenter cut, joined across breaks "
+           f"under 1:30, which is how the second interval of a two-interval "
+           f"day reaches this chart at all. "
+           if n_reb else "")
+        + "**Day avg** is that day's own average across its intervals of this "
+        "class, which is what the green line plots. Exact lengths and the "
+        "source of every bar are listed below."
     )
 
     rows = []
@@ -280,14 +338,22 @@ def _interval_by_day(ctx):
             "Length": iw.fmt_rep(r.secs),
             "Session length": iw.fmt_rep(r.dur_s),
             "Sessions that day": int(r.n_sessions),
+            "Source": str(getattr(r, "source", "") or ""),
         })
     dataframe(pd.DataFrame(rows), height=300)
 
     with st.expander("What these watts are, and are not"):
         st.markdown(
-            f"- **Source:** the peak-meter reading recorded per session, with "
-            f"the window it was sustained over. This is the head unit's best "
-            f"sustained average, which is a real measurement of something real.\n"
+            f"- **Source.** Every bar names its instrument in the table above "
+            f"and on hover. Either the peak-meter reading recorded per session "
+            f"— the head unit's best sustained average over the window it "
+            f"reports, a real measurement of something real — or an effort "
+            f"**rebuilt from the detector's own fragments**: the pieces the "
+            f"segmenter cut one long block into, rejoined across breaks under "
+            f"1:30, and only where that meter window vouches for the effort "
+            f"(its length and watts within tolerance) with no detected effort "
+            f"within two minutes of the result. One instrument per bar, never "
+            f"two counting the same effort.\n"
             f"- **Not a prescription.** The coach's written target watts come "
             f"from the session comments and stop at 2025 — there are none in "
             f"2026, so nothing here is matched against an intended wattage.\n"

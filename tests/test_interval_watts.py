@@ -367,13 +367,17 @@ check("day_options offers only pairs that exist",
       got == {("FTP", "20-30 min"), ("END", "30+ min"), ("END", "10-20 min")},
       f"{sorted(got)}")
 fr = O[(O["tt"] == "FTP") & (O["cls"] == "20-30 min")].iloc[0]
-check("day_options counts DAYS, so the picker cannot promise more bars than "
-      "the chart draws",
-      int(fr["days"]) == 2, f"{int(fr['days'])} days")
-check("day_options also carries the sessions behind those days",
+check("day_options carries the days AND the bars it will draw, so the picker "
+      "cannot promise more bars than the chart draws",
+      int(fr["days"]) == 2 and int(fr["bars"]) == len(S),
+      f"{int(fr['days'])} days / {int(fr['bars'])} bars vs {len(S)} drawn")
+check("a day that drew one bar is never counted as two, and never the "
+      "reverse",
+      int(fr["days"]) <= int(fr["bars"]),
+      f"{int(fr['days'])} days, {int(fr['bars'])} bars")
+check("day_options also carries the sessions behind those days, counted "
+      "once per day",
       int(fr["sessions"]) == 4, f"{int(fr['sessions'])} sessions")
-check("the picker's day count equals the number of bars drawn",
-      int(fr["days"]) == len(S), f"picker {int(fr['days'])} vs {len(S)} bars")
 check("the picker's median is the median of the bars drawn, not of the "
       "sessions behind them",
       abs(float(fr["med_w"]) - float(S["w"].median())) < 1e-9,

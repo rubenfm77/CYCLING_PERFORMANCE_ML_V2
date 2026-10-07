@@ -184,7 +184,10 @@ else:
 
     iv = read_intervals("2025-01-01T00:00:00")
     df = load_data()
-    sets, _ = fill_peak_efforts(build_sets(iv, None, df), df)
+    # `iv` is threaded through BOTH sides on purpose: the detail and the day
+    # chart must read the same rebuild, or the invariant below would be
+    # comparing two different data sets.
+    sets, _ = fill_peak_efforts(build_sets(iv, None, df), df, iv=iv)
     s, _ = add_signatures(sets)
     s = prep_types(s)
     assert "dur_cls" in s.columns, "prep_types did not file a length class"
@@ -194,7 +197,7 @@ else:
     # the reported case: every day Evolution charts for FTP / 20-30 min must
     # be a session of the detail's FTP / 20-30 min
     cls = "20-30 min"
-    evo = iw.day_series(df, "FTP", cls)
+    evo = iw.day_series(df, "FTP", cls, iv=iv)
     pv = run_protocol_view(iv, s, "FTP", None, cls)
     assert pv["ok"], pv.get("reason")
     detail = set(pd.to_datetime(pv["sessions"]["date"]).dt.normalize())

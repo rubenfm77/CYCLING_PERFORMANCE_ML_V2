@@ -15,7 +15,7 @@ import pandas as pd
 
 from core.data import load_data
 from ml import interval_watts as iw
-from views.evolution import _day_figure
+from views.evolution import _day_figure, _slot_labels
 
 df = load_data()
 opts = iw.day_options(df)
@@ -48,7 +48,28 @@ assert {round(float(y), 6) for y in avg.y} == {round(mean_w, 6)}
 
 print("5. x-axis is the day, category-ordered, in date order")
 assert fig.layout.xaxis.type == "category"
-assert list(bars.x) == [str(pd.Timestamp(d).date()) for d in S["day"]]
+# A day that rode two efforts of this class draws two bars, indexed under its
+# own date ("2026-09-30", "2026-09-30·2") rather than stacked on one slot.
+assert list(bars.x) == _slot_labels(S["day"])
+dates = [str(pd.Timestamp(d).date()) for d in S["day"]]
+assert [x.split("·")[0] for x in bars.x] == dates, "the axis is a date axis"
+assert len(set(bars.x)) == len(bars.x), "two bars of one day would overlap"
+print(f"   {len(S)} bars, {len(set(dates))} days, {len(set(bars.x))} slots")
+
+multi = opts[opts["bars"] > opts["days"]]
+if len(multi):
+    m = multi.iloc[0]
+    S2 = iw.day_series(df, m.tt, m.cls)
+    xs = list(_day_figure(S2, m.tt, m.cls).data[0].x)
+    assert len(xs) == len(S2) == int(m.bars), (len(xs), len(S2), int(m.bars))
+    assert len(set(xs)) == len(xs), "a two-effort day drew overlapping bars"
+    d2 = [str(pd.Timestamp(d).date()) for d in S2["day"]]
+    assert sum("·" in x for x in xs) == len(d2) - len(set(d2)), \
+        "only a day's later bars may be indexed"
+    assert all(x.split("·")[0] == str(pd.Timestamp(d).date())
+               for x, d in zip(xs, S2["day"]))
+    print(f"   {m.tt} / {m.cls}: {len(S2)} bars over {int(m.days)} day(s), "
+          f"every bar on its own slot")
 
 print("6. the y-axis floor in the subtitle is the floor that was applied")
 y_lo, y_hi = fig.layout.yaxis.range
@@ -97,10 +118,12 @@ print(f"   e.g. {str(day_line.x[0])} -> {got[0]:.0f} W")
 
 print("10. the day average is printed, not only drawn")
 tbl = [str(pd.Timestamp(d).date()) for d in S["day"]]
-assert tbl == list(bars.x), "table rows and bars must be the same days"
+assert len(tbl) == len(bars.x), "table rows and bars must be the same efforts"
+assert tbl == [x.split("·")[0] for x in bars.x], \
+    "table rows and bars must be the same days"
 for v in S["day_avg"]:
     assert str(iw.fmt_watts(v)) != "", v
-print(f"   day average for every one of the {len(tbl)} charted day(s)")
+print(f"   day average for every one of the {len(tbl)} charted bar(s)")
 
 print("11. the day average is never mixed across lengths")
 # It is computed inside one rep class only: with a single session that day it

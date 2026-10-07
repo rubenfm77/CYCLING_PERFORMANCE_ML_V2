@@ -766,26 +766,196 @@ def power_law(m: pd.DataFrame, tt: str | None = None,
     return out
 
 
-# ── per day: the bar-and-line chart ──────────────────────────────────────────
-def effort_best(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per session carrying its best SUSTAINED effort.
+# ── putting back together the effort the detector cut into pieces ─────────────
+# The detector segments a ride by power and cadence stability, so ONE long
+# block comes back as several rows with short recovery rows between them: on
+# 30 Sep 2026 the meter held 244 W over 22:00, while the detector's own rows
+# for the two intervals behind that reading are 158 + 285 + 384 + 180 s
+# (separated by 36, 87 and 27 s) and 882 + 324 s. A meter that reports ONE
+# window per ride can therefore never show a rider who did TWO intervals what
+# they rode — which is the defect: one bar where two efforts happened.
+#
+# Every condition below exists to stop the rebuild inventing an effort:
+#
+#   * the ride's OWN peak window vouches for it: the window is at least
+#     REBUILD_MIN_S long and the detector reported nothing in its class —
+#     where the detector already told the story whole, nothing is rebuilt;
+#   * WORK rows join only across breaks shorter than REBUILD_DIP_S, the WHOLE
+#     break counted: a 27 s glance at the computer does not end a 20-minute
+#     interval, but 60 s + 60 s of rest does, so consecutive recovery rows
+#     accumulate before the decision is made;
+#   * the joined run must be within REBUILD_LEN_TOL of the meter's window and
+#     within REBUILD_W_TOL of its watts. The meter is what vouches for the
+#     rebuild, so a run the meter does not describe is left alone;
+#   * no detected effort within REBUILD_NEAR_S of the run, so one effort is
+#     never drawn twice — and that already covers the whole-minute class test,
+#     because two lengths under the same whole-minute label are at most 60 s
+#     apart and 60 < 120.
+#
+# A rebuilt run is MEASURED from the detector's own rows, so its class is the
+# class of its OWN length and never the meter's: 19:17 sits in "10-20 min" and
+# 20:07 in "20-30 min" because that is where those lengths sit. The exact
+# seconds ride on every bar, so the class is a bucket and never the
+# description of the effort.
+REBUILD_MIN_S = 600.0        # the sustained floor, same as the peak fill
+REBUILD_NEAR_S = 120.0       # a detected effort this close IS this effort
+REBUILD_DIP_S = 90.0         # a break this short belongs to the effort
+REBUILD_LEN_TOL = 0.15       # run length within 15 % of the meter's window
+REBUILD_W_TOL = 0.10         # run watts within 10 % of the meter's watts
+REBUILD_SRC = "rebuilt from detector fragments"
+PEAK_ROW_SRC = "peak meter (intervals.icu)"
 
-    Session grain, from the peak-meter fields. This is the source that actually
-    contains the athlete's long intervals: `measured()` is rep grain and reports
-    what the detector found unusual, which on a real interval session is mostly
-    the 10-second accelerations at the start of each rep.
+
+def _iv_runs(rows: pd.DataFrame) -> list:
+    """WORK runs of one activity, bridging breaks shorter than REBUILD_DIP_S.
+
+    `rows` is one activity's interval rows in `seq` order. A break is bridged
+    only when the WHOLE of it is short, and the break's seconds then sit
+    inside the span with their own watts weighted by their own seconds — so a
+    run's average is the block's own average, never a mean of means.
+    """
+    runs, cur = [], None
+    dip_s = dip_e = 0.0
+    for r in rows.itertuples(index=False):
+        try:
+            secs = float(getattr(r, "secs", np.nan))
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(secs) or secs <= 0:
+            continue
+        try:
+            w = float(getattr(r, "avg_w", np.nan))
+        except (TypeError, ValueError):
+            w = np.nan
+        if not np.isfinite(w):
+            w = 0.0
+        is_work = str(getattr(r, "iv_type", "")).strip().upper() == "WORK"
+        if is_work:
+            if cur is not None and dip_s > 0:
+                if dip_s < REBUILD_DIP_S:          # one effort, continued
+                    cur["secs"] += dip_s
+                    cur["energy"] += dip_e
+                    cur["n_dips"] += 1
+                else:                              # two efforts, parted
+                    runs.append(cur)
+                    cur = None
+            dip_s = dip_e = 0.0
+            if cur is None:
+                cur = {"secs": 0.0, "energy": 0.0, "parts": [], "n_dips": 0}
+            cur["secs"] += secs
+            cur["energy"] += secs * w
+            cur["parts"].append(secs)
+        elif cur is not None:
+            dip_s += secs
+            dip_e += secs * w
+    if cur is not None:
+        runs.append(cur)      # a ride's tail never shortens its last effort
+    return [{"secs": r["secs"], "w": r["energy"] / r["secs"],
+             "parts": r["parts"], "n_dips": r["n_dips"]}
+            for r in runs if r["secs"] > 0]
+
+
+def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
+    """Whole efforts the detector cut into pieces — see the note above.
+
+    One row per rebuilt effort with `activity_id, date, day, secs, w, cls,
+    parts, pieces, n_dips, peak_w, peak_s`. The meter's own window travels
+    beside every rebuild so a reader can check one against the other. Empty
+    (with its columns) whenever there is nothing to rebuild, and nothing is
+    ever rebuilt without a peak window vouching for it.
+    """
+    cols = ["activity_id", "date", "day", "secs", "w", "cls", "parts",
+            "pieces", "n_dips", "peak_w", "peak_s"]
+    empty = pd.DataFrame(columns=cols)
+    if iv is None or not len(iv) or df_all is None or not len(df_all):
+        return empty
+    if not {"iv_type", "secs", "avg_w", "activity_id"}.issubset(iv.columns):
+        return empty
+    if not {"id", BEST_W_COL, BEST_S_COL, "date"}.issubset(df_all.columns):
+        return empty
+
+    pk = df_all[["id", BEST_W_COL, BEST_S_COL, "date"]].copy()
+    pk["activity_id"] = pk["id"].astype(str)
+    pk["pk_w"] = pd.to_numeric(pk[BEST_W_COL], errors="coerce")
+    pk["pk_s"] = pd.to_numeric(pk[BEST_S_COL], errors="coerce")
+    pk["date"] = pd.to_datetime(pk["date"], errors="coerce")
+    pk = pk[pk["pk_w"].notna() & pk["pk_s"].notna() & (pk["pk_w"] > 0)
+            & (pk["pk_s"] >= REBUILD_MIN_S) & pk["date"].notna()]
+    pk = pk.drop_duplicates("activity_id", keep="first")
+    if not len(pk):
+        return empty
+
+    frame = pd.DataFrame({
+        "_aid": iv["activity_id"].astype(str),
+        "iv_type": iv["iv_type"].astype(str),
+        "secs": pd.to_numeric(iv["secs"], errors="coerce"),
+        "avg_w": pd.to_numeric(iv["avg_w"], errors="coerce"),
+        "_seq": (pd.to_numeric(iv["seq"], errors="coerce")
+                 if "seq" in iv.columns else np.arange(len(iv))),
+    })
+
+    rows = []
+    for p in pk.itertuples(index=False):
+        g = frame[frame["_aid"] == str(p.activity_id)]
+        if not len(g):
+            continue
+        g = g.sort_values("_seq", kind="stable")
+        window = rep_class(float(p.pk_s))
+        work = g.loc[g["iv_type"].str.upper() == "WORK", "secs"].dropna()
+        # The anchor: where the detector already reports an effort of the
+        # window's class, it told this story whole and nothing is rebuilt.
+        if len(work) and any(rep_class(x) == window for x in work):
+            continue
+        for run in _iv_runs(g):
+            s, w, pk_s, pk_w = run["secs"], run["w"], float(p.pk_s), float(p.pk_w)
+            if s < REBUILD_MIN_S:
+                continue
+            if abs(s - pk_s) > REBUILD_LEN_TOL * pk_s:
+                continue
+            if abs(w - pk_w) > REBUILD_W_TOL * pk_w:
+                continue
+            if len(work) and bool((np.abs(work.values - s)
+                                   <= REBUILD_NEAR_S).any()):
+                continue
+            rows.append({
+                "activity_id": str(p.activity_id),
+                "date": p.date,
+                "day": pd.Timestamp(p.date).normalize(),
+                "secs": int(round(s)),
+                "w": float(w),
+                "cls": rep_class(s),
+                "parts": len(run["parts"]),
+                "pieces": " + ".join(fmt_rep(x) for x in run["parts"]),
+                "n_dips": int(run["n_dips"]),
+                "peak_w": float(pk_w),
+                "peak_s": int(round(pk_s)),
+            })
+    return pd.DataFrame(rows, columns=cols)
+
+
+# ── per day: the bar-and-line chart ──────────────────────────────────────────
+def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFrame:
+    """One row per sustained effort — session grain, plus what was rebuilt.
+
+    The meter's own window is the source: it is the only reading that says
+    how long a long effort was actually held, while `measured()` is rep grain
+    and mostly reports the 10-second accelerations at the start of each rep.
+    Where the detector cut that effort into pieces, `iv` lets the rebuilt runs
+    replace the single meter reading — one row per effort actually ridden, so
+    a session that held two 20-minute intervals draws two bars instead of the
+    meter's one window. `source` says which of the two reported each row.
 
     The duration travels with the wattage and is NOT assumed. A peak of 258 W
     over 8:00 is a different effort from 188 W over 26:00 and averaging the two
     would be the exact error this module exists to avoid, so `cls` is derived
     per row and callers bucket on it.
     """
+    cols = ["date", "day", "src", "tt", "secs", "cls", "w", "n", "source",
+            "pieces"]
     if df is None or not len(df):
-        return pd.DataFrame(columns=["date", "day", "src", "tt", "secs",
-                                     "cls", "w", "n"])
+        return pd.DataFrame(columns=cols)
     if BEST_W_COL not in df.columns or BEST_S_COL not in df.columns:
-        return pd.DataFrame(columns=["date", "day", "src", "tt", "secs",
-                                     "cls", "w", "n"])
+        return pd.DataFrame(columns=cols)
     label = (df["training_type"].astype(object)
              if "training_type" in df.columns else None)
     keep = _has_label(label) if label is not None else pd.Series(
@@ -793,6 +963,15 @@ def effort_best(df: pd.DataFrame) -> pd.DataFrame:
     w = pd.to_numeric(df[BEST_W_COL], errors="coerce")
     s = pd.to_numeric(df[BEST_S_COL], errors="coerce")
     ok = keep & w.notna() & s.notna() & (s > 0) & (w > 0)
+    # Rebuilt efforts, keyed on the session they came from. A session with any
+    # of them draws those instead of its meter window — the runs ARE the
+    # window, seen as the efforts that were ridden. `iv=None` (every caller
+    # that does not pass the cache) changes nothing at all.
+    reb_by = {}
+    if iv is not None and len(iv):
+        rb = rebuilt_efforts(iv, df)
+        if len(rb):
+            reb_by = {a: g for a, g in rb.groupby("activity_id", sort=False)}
     rows = []
     for i in df.index[ok]:
         d = df.at[i, "date"] if "date" in df.columns else None
@@ -801,7 +980,7 @@ def effort_best(df: pd.DataFrame) -> pd.DataFrame:
         # the athlete calls one day and make the day-over-day line zigzag for a
         # reason that has nothing to do with training.
         day = pd.to_datetime(d).normalize() if d is not None else None
-        rows.append({
+        base = {
             "date": d,
             "day": day,
             # The index of the session in `df`. Carried explicitly because this
@@ -809,11 +988,22 @@ def effort_best(df: pd.DataFrame) -> pd.DataFrame:
             # would silently pick the wrong session's average watts.
             "src": i,
             "tt": str(label.at[i]).strip() if label is not None else "",
-            "secs": int(round(float(s.at[i]))),
-            "cls": rep_class(float(s.at[i])),
-            "w": float(w.at[i]),
             "n": 1,
-        })
+        }
+        act = str(df.at[i, "id"]) if "id" in df.columns else ""
+        hits = reb_by.get(act)
+        if hits is not None and len(hits):
+            for r in hits.itertuples(index=False):
+                rows.append({**base, "secs": int(r.secs), "cls": r.cls,
+                             "w": float(r.w), "source": REBUILD_SRC,
+                             "pieces": r.pieces})
+            continue
+        rows.append({**base,
+                     "secs": int(round(float(s.at[i]))),
+                     "cls": rep_class(float(s.at[i])),
+                     "w": float(w.at[i]),
+                     "source": PEAK_ROW_SRC,
+                     "pieces": ""})
     out = pd.DataFrame(rows)
     if len(out):
         # From `day`, not from the raw date string. `day` was parsed one value
@@ -825,8 +1015,9 @@ def effort_best(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
-    """The ONE day-level frame the whole bar chart reads. Session rows collapsed.
+def _effort_by_day(df: pd.DataFrame, with_avg: bool = True,
+                   iv: pd.DataFrame | None = None) -> pd.DataFrame:
+    """The ONE day-level frame the whole bar chart reads.
 
     Both `day_series` and `day_options` read this, and that is the point: when
     they were computed separately the picker's count and the number of bars drawn
@@ -834,14 +1025,26 @@ def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
     promising four days and then drawing two bars is exactly the kind of quiet
     mismatch this project refuses to ship.
 
-    Collapsing rule: a day keeps its BEST sustained effort, never the mean of
-    two. The mean is a third number describing neither ride, and "what did I do
-    on the 14th" is answered by the hardest effort of it. `n_sessions` records
-    when a day held more than one ride rather than hiding it.
+    One row per BAR, under two rules decided here and nowhere else:
+
+      * several RIDES on one day still give that day ONE bar — its hardest
+        effort. The mean of two rides is a third number describing neither,
+        and "what did I do on the 14th" is answered by the hardest effort of
+        it. `n_sessions` records that the day held more than one ride rather
+        than hiding it;
+      * ONE ride that made SEVERAL efforts of this class draws every one of
+        them. That is 30 Sep 2026: two 20-minute intervals inside one session
+        and a meter that reports a single window. Collapsing them to that one
+        window is the defect — a day the athlete rode twice is not the same
+        thing as an athlete who rode once.
+
+    `day_avg` is the plain mean of that day's bars — the number to follow over
+    time — computed strictly within ONE length class, so a 7:30 rep never
+    meets a 20:00 one.
     """
     cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
-            "day_avg", "avg_w", "dur_s", "year"]
-    b = effort_best(df)
+            "day_avg", "avg_w", "dur_s", "year", "source", "pieces"]
+    b = effort_best(df, iv)
     if b is None or not len(b):
         return pd.DataFrame(columns=cols)
 
@@ -854,47 +1057,56 @@ def _effort_by_day(df: pd.DataFrame, with_avg: bool = True) -> pd.DataFrame:
     rows = []
     for (tt, cls, day), grp in b.groupby(["tt", "cls", "day"]):
         # `src` is each session's own index in `df`, so these are the right rows
-        # and not merely rows at the same positions.
-        idxs = list(grp["src"])
-        top = grp.loc[grp["w"].idxmax()]
-        rows.append({
-            "day": day,
-            "date": top["date"],
-            "src": int(top["src"]),
-            "tt": tt,
-            "cls": cls,
-            "secs": int(top["secs"]),
-            "w": float(top["w"]),
-            "n": 1,
-            "n_sessions": int(len(grp)),
-            # The day's own AVERAGE across every interval of this class it
-            # held, kept beside the best one instead of replacing it. It is
-            # what a reader tracks over time ("what did 30 Sep average"),
-            # while the bar stays the hardest effort of the day — and the two
-            # are only equal on a single-session day. Averaged strictly within
-            # one length class, so a 7:30 rep never meets a 20:00 one.
-            "day_avg": float(grp["w"].mean()),
-            "avg_w": (float(avg.loc[idxs].mean())
-                      if avg is not None and idxs else float("nan")),
-            "dur_s": (float(dur.loc[idxs].mean())
-                      if dur is not None and idxs else float("nan")),
-            "year": int(top["year"]),
-        })
+        # and not merely rows at the same positions. Unique, because one
+        # session may now appear twice and its averages must not be counted
+        # twice with it.
+        idxs = list(dict.fromkeys(grp["src"]))
+        n_rides = int(grp["src"].nunique())
+        sub = grp if n_rides == 1 else grp.loc[[grp["w"].idxmax()]]
+        day_avg = float(grp["w"].mean())
+        for top in sub.itertuples(index=False):
+            rows.append({
+                "day": day,
+                "date": top.date,
+                "src": int(top.src),
+                "tt": tt,
+                "cls": cls,
+                "secs": int(top.secs),
+                "w": float(top.w),
+                "n": 1,
+                "n_sessions": n_rides,
+                # The day's own AVERAGE across every interval of this class it
+                # held, kept beside the bars instead of replacing them. It is
+                # what a reader tracks over time ("what did 30 Sep average"),
+                # while the bars stay the efforts actually ridden — and the two
+                # are only equal on a single-effort day.
+                "day_avg": day_avg,
+                "avg_w": (float(avg.loc[idxs].mean())
+                          if avg is not None and idxs else float("nan")),
+                "dur_s": (float(dur.loc[idxs].mean())
+                          if dur is not None and idxs else float("nan")),
+                "year": int(top.year),
+                "source": getattr(top, "source", ""),
+                "pieces": getattr(top, "pieces", ""),
+            })
     return pd.DataFrame(rows).sort_values(["tt", "cls", "day"]).reset_index(
         drop=True)
 
 
 def day_series(df: pd.DataFrame, tt: str, cls: str,
-               with_avg: bool = True) -> pd.DataFrame:
-    """Per-day rows for ONE type and ONE rep-length class, for the bar chart.
+               with_avg: bool = True,
+               iv: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Bars for ONE type and ONE rep-length class: one row per effort drawn.
 
-    One row per DAY that has an effort of that length, carrying the day's own
-    average watts alongside so the two can be read against each other on the same
-    axis without ever being averaged into one number.
+    A day that rode two efforts of this class comes back twice (the two 20-min
+    intervals of 30 Sep 2026), each carrying its own exact length, and the
+    day's own average watts travels on every one of them so the two can be read
+    against each other on the same axis without ever being averaged into one
+    number.
     """
     cols = ["day", "date", "src", "tt", "cls", "secs", "w", "n", "n_sessions",
-            "day_avg", "avg_w", "dur_s", "year"]
-    d = _effort_by_day(df, with_avg)
+            "day_avg", "avg_w", "dur_s", "year", "source", "pieces"]
+    d = _effort_by_day(df, with_avg, iv)
     if d is None or not len(d):
         return pd.DataFrame(columns=cols)
     s = d[(d["tt"] == tt) & (d["cls"] == cls)]
@@ -903,28 +1115,34 @@ def day_series(df: pd.DataFrame, tt: str, cls: str,
     return s.sort_values("day").reset_index(drop=True)
 
 
-def day_options(df: pd.DataFrame) -> pd.DataFrame:
-    """Every (type x rep class) pair that has at least one peak-meter effort.
+def day_options(df: pd.DataFrame,
+                iv: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Every (type x rep class) pair the day chart can draw, counted honestly.
 
-    Counted in DAYS, because that is what the chart draws. `sessions` is carried
-    alongside for the days that held more than one ride, so the picker can show
-    both and the two can never be confused for each other.
+    Two counts, because they are no longer the same number and the picker may
+    not promise what it does not draw: `days` is distinct calendar days, `bars`
+    is what will be drawn (a day that rode two efforts of this class draws
+    two). `sessions` counts rides, deduplicated per day so a two-bar day is
+    never reported as two sessions.
     """
-    cols = ["tt", "cls", "days", "sessions", "med_w", "med_secs", "first",
-            "last", "years"]
-    d = _effort_by_day(df)
+    cols = ["tt", "cls", "days", "bars", "sessions", "med_w", "med_secs",
+            "first", "last", "years"]
+    d = _effort_by_day(df, iv=iv)
     if d is None or not len(d):
         return pd.DataFrame(columns=cols)
-    g = d.groupby(["tt", "cls"]).agg(
-        days=("day", "size"),
-        sessions=("n_sessions", "sum"),
-        med_w=("w", "median"),
-        med_secs=("secs", "median"),
-        first=("day", "min"),
-        last=("day", "max"),
-        years=("year", "nunique"),
-    ).reset_index()
-    return g.sort_values(["years", "days"], ascending=False).reset_index(
+    bars = d.groupby(["tt", "cls"], as_index=False).size().rename(
+        columns={"size": "bars"})
+    per_day = d.drop_duplicates(["tt", "cls", "day"])
+    day_lvl = per_day.groupby(["tt", "cls"], as_index=False).agg(
+        days=("day", "nunique"), sessions=("n_sessions", "sum"))
+    g = (d.groupby(["tt", "cls"], as_index=False)
+         .agg(med_w=("w", "median"), med_secs=("secs", "median"),
+              first=("day", "min"), last=("day", "max"),
+              years=("year", "nunique"))
+         .merge(day_lvl, on=["tt", "cls"], how="left")
+         .merge(bars, on=["tt", "cls"], how="left"))
+    g = g[cols]
+    return g.sort_values(["years", "bars"], ascending=False).reset_index(
         drop=True)
 
 

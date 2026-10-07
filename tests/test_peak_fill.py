@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, SET_COLUMNS,
+from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, REBUILD_SRC,
+                              SET_COLUMNS,
                               _dur_label, build_sets, fill_peak_efforts,
                               quality_gates)
 
@@ -180,6 +181,58 @@ else:
             f"{r.activity_id}: {r.rep_secs} already in a detected class"
     print(f"   PASS  {n} readings added, none of them a re-count of a "
           f"detection, short side unchanged")
+
+    # 2b — with the detector's fragments rebuilt: a SECOND source, the SAME
+    # guards. A session whose long block the segmenter cut into pieces gets
+    # one row per whole effort, and the meter's window is replaced by them
+    # rather than drawn beside them.
+    filled2, n2 = fill_peak_efforts(base.copy(), df, iv=iv)
+    reb = filled2[filled2["Source"] == REBUILD_SRC]
+    peak2 = filled2[filled2["Source"] == PEAK_SRC]
+    print(f"   rebuilt {len(reb)} row(s) from the fragments, {len(peak2)} "
+          f"straight meter readings ({n2} added, {n} without a rebuild)")
+
+    assert len(filled2) == len(base) + n2, (len(filled2), len(base), n2)
+    assert (filled2["Source"] == DETECTED_SRC).sum() == len(base), \
+        "a detection was removed or retagged"
+    assert len(reb) + len(peak2) == n2
+    assert len(reb), "the cache holds fragmented long efforts but none rebuilt"
+
+    # same floor as the meter readings, one row per effort, never a blend
+    assert (pd.to_numeric(reb["rep_secs"]) >= 600).all(), \
+        "a rebuilt row under the 10-minute floor"
+    assert (reb["reps"] == 1).all()
+    assert classes(filled2) == classes(base), \
+        "the short-effort side changed with the rebuild on"
+    # one ride never reports the same window twice
+    both = set(peak2["activity_id"].astype(str)) & set(
+        reb["activity_id"].astype(str))
+    assert not both, f"{both}: rebuilt AND meter row for the same ride"
+
+    # the two double-count guards, exactly as the meter rows face them
+    for r in reb.itertuples():
+        have = det.get(str(r.activity_id), [])
+        assert not any(abs(x - float(r.rep_secs)) <= 120 for x in have), \
+            f"{r.activity_id}: {r.rep_secs} within 2 min of a detection"
+        assert not any(_dur_label(x) == _dur_label(r.rep_secs)
+                       for x in have), \
+            f"{r.activity_id}: {r.rep_secs} in a detected class"
+    # and a rebuilt row must reproduce the window that vouched for it
+    from ml.interval_watts import REBUILD_W_TOL, rebuilt_efforts
+    vouch = rebuilt_efforts(iv, df)
+    assert len(vouch) >= len(reb), (len(vouch), len(reb))
+    vk = {(str(a), int(s)) for a, s in zip(vouch["activity_id"], vouch["secs"])}
+    rk = {(str(a), int(s)) for a, s in zip(reb["activity_id"], reb["rep_secs"])}
+    assert rk <= vk, f"{rk - vk}: a rebuilt row no window vouched for"
+    for r in vouch.itertuples():
+        assert abs(r.w - r.peak_w) <= REBUILD_W_TOL * r.peak_w + 1e-9, \
+            (r.activity_id, r.w, r.peak_w)
+        assert r.peak_s >= 600 and r.secs >= 600, \
+            (r.activity_id, r.secs, r.peak_s)
+        assert abs(r.secs - r.peak_s) <= 0.15 * r.peak_s, \
+            (r.activity_id, r.secs, r.peak_s)
+    print(f"   PASS  rebuild: {len(reb)} whole effort(s) with the meter "
+          f"window replaced, guards and short side unchanged")
 
     # the complaint: 20-minute FTP sessions were invisible here
     from ml.set_evolution import add_signatures

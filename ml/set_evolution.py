@@ -20,6 +20,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# The rebuild lives with the rep classes and the peak-meter columns because it
+# must answer to both: it joins the detector's fragments, and it is judged
+# against the meter's window. Imported, not retyped.
+from ml.interval_watts import REBUILD_SRC, rebuilt_efforts  # noqa: E402
+
 # Minimum pairwise observations before an association is shown at all.
 MIN_ASSOC_N = 8
 # Minimum sets per TSB side before the fresh/fatigued split is shown.
@@ -246,15 +251,28 @@ DETECTED_SRC = "detected interval"
 
 def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
                       min_s: float = PEAK_MIN_S,
-                      near_s: float = PEAK_NEAR_S):
-    """Add the peak-power reading of an effort the detector did not report.
+                      near_s: float = PEAK_NEAR_S,
+                      iv: pd.DataFrame | None = None):
+    """Add an effort of at least `min_s` that the detector did not report whole.
 
     Why this exists: the detector found no row of 10 min or longer on the
     20-minute FTP sessions of Sep 2026, so the "20 min" duration class on the
     Intervals page carried a single session while Evolution showed every one
     of them. The peak meter holds the same session's best sustained window.
 
-    What it does, and what it refuses to do:
+    TWO sources feed what is added, and which one speaks depends on how much
+    of the story the detector already told:
+
+      * pass `iv` and the detector's own fragments are put back together first
+        (see `ml.interval_watts.rebuilt_efforts`): one long block cut into
+        pieces by the segmenter comes back as its whole runs, one row each —
+        which is how a session that rode TWO 20-minute intervals shows two
+        rows instead of the meter's single window. A rebuild only ever fires
+        where the meter's window vouches for the effort;
+      * where nothing could be rebuilt, the meter's own window is added
+        exactly as before.
+
+    What it refuses to do, from either source:
 
       * only efforts of at least `min_s` seconds — the long-effort domain
         where the detector is known to cut sustained work; short intervals
@@ -263,11 +281,13 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
         of the reading (the detector found the same effort, under its own
         segmentation) and no detected set in the same whole-minute duration
         class (the two would then be the same effort filed twice);
-      * never more than one reading per activity — the peak meter reports one
-        window per ride;
-      * every added row carries `Source = peak meter (intervals.icu)`, every
-        existing row `Source = detected interval`, and the count is returned
-        so the page can state it instead of hiding it.
+      * never two rows for one activity from the same source — the meter
+        reports one window per ride, and a rebuild that fires replaces it
+        rather than sitting beside it;
+      * every added row carries `Source` (`rebuilt from detector fragments`
+        or `peak meter (intervals.icu)`), every existing row `Source =
+        detected interval`, and the count is returned so the page can state
+        it instead of hiding it.
 
     Returns `(sets, n_added)`.
     """
@@ -280,6 +300,18 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
     need = {PEAK_W_COL, PEAK_S_COL, "date"}
     if df_all is None or not len(df_all) or not need.issubset(df_all.columns):
         return src, 0
+
+    # The rebuild, keyed on the activity it came from. Without `iv` this is
+    # empty and the function behaves exactly as it did before it existed.
+    reb_by: dict = {}
+    if iv is not None and len(iv):
+        try:
+            _reb = rebuilt_efforts(iv, df_all)
+        except Exception:                  # a cache in the wrong shape
+            _reb = None
+        if _reb is not None and len(_reb):
+            reb_by = {str(a): g for a, g in _reb.groupby("activity_id",
+                                                         sort=False)}
 
     # One candidate per activity id: the peak meter reports ONE window per ride.
     cols = list(need) + [c for c in ("id", "training_type")
@@ -308,7 +340,8 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
 
     rows = []
     for r in cand.sort_values("date").itertuples(index=False):
-        act = str(getattr(r, "id", "") or "")
+        raw = str(getattr(r, "id", "") or "")
+        act = raw
         if not act:
             # No activity id in this file: key the reading on the day itself,
             # so two days never collapse into one bucket.
@@ -317,6 +350,36 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
         if act in filled:
             continue
         have = by_act.get(act, [])
+        # First choice: the detector's own fragments, put back together. Every
+        # run must clear the SAME two guards a meter reading has to clear, so
+        # whichever source speaks, one effort is still never counted twice.
+        hits = reb_by.get(raw) if raw else None
+        if hits is not None and len(hits):
+            kept = [q for q in hits.itertuples(index=False)
+                    if not any(abs(x - float(q.secs)) <= near_s for x in have)
+                    and not any(_dur_label(x) == _dur_label(q.secs)
+                                for x in have)]
+            if kept:
+                for q in kept:
+                    rows.append({
+                        "activity_id": act, "date": r.date,
+                        "_key": f"rebuilt:{act}:{float(q.secs):.0f}s",
+                        "reps": 1, "rep_secs": float(q.secs), "set_w": float(q.w),
+                        "set_np": np.nan, "set_hr": np.nan, "intensity": np.nan,
+                        "load": np.nan, "cad": np.nan, "decoupling": np.nan,
+                        "first_seq": np.nan, "last_seq": np.nan, "rest": np.nan,
+                        "name": "", "temp": np.nan,
+                        "moving_time": np.nan, "act_iv_n": np.nan,
+                        "act_iv_secs": np.nan, "act_iv_dist": np.nan,
+                        "act_start": pd.NaT, "act_iv_rows": np.nan,
+                        "set_ss_cp_w": np.nan, "set_ss_w_prime_kj": np.nan,
+                        "set_w5s_cv": np.nan,
+                        "db_type": str(getattr(r, "training_type",
+                                               "") or "").strip(),
+                        "Source": REBUILD_SRC,
+                    })
+                filled.add(act)
+                continue                # the meter's window is now explained
         if any(abs(x - secs) <= near_s for x in have):
             continue                       # the detector found this effort
         cls = _dur_label(secs)
