@@ -855,8 +855,11 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                               "interval", list(dur_lab), key="iv_type_dur")
     cls = dur_lab[dur_choice]
     fam_name = FAMILY_SHORT.get(fam, fam)
-    st.caption(f"**{fam_name} at {cls}** — a {cls} interval is the only "
-               f"thing ever compared with a {cls} interval. No other "
+    # "an under 90s interval", but "a 5-10 min interval": the article follows
+    # how the class NAME starts, never a hardcoded "a".
+    art = "an" if cls[:1].lower() in "aeiou" else "a"
+    st.caption(f"**{fam_name} at {cls}** — {art} {cls} interval is the only "
+               f"thing ever compared with {art} {cls} interval. No other "
                f"training type, no other duration class, no workout-average "
                f"substitution. Same classes as the Evolution day chart: "
                f"every day it draws for this class is a session here too.")
