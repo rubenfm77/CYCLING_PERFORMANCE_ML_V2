@@ -11,19 +11,29 @@ Run: python -c "from tests import test_evolution_bars"
 import warnings
 warnings.filterwarnings("ignore")
 
+from pathlib import Path
+
 import pandas as pd
 
 from core.data import load_data
+from core.interval_data import read_intervals
 from ml import interval_watts as iw
 from views.evolution import _day_figure, _slot_labels
 
+# The detector's cache is threaded through the SAME way the page threads it,
+# so a day whose long effort was rebuilt from fragments is charted here exactly
+# as it is charted there — including a day that drew two bars.
+CACHE = Path("data/interval_cache.csv")
+iv = read_intervals("2019-01-01T00:00:00") if CACHE.exists() else None
+print(f"   cache {'loaded' if iv is not None else 'absent — meter rows only'}")
+
 df = load_data()
-opts = iw.day_options(df)
+opts = iw.day_options(df, iv=iv)
 print(f"1. {len(opts)} (type x rep class) pairs available")
 assert len(opts), "no peak-meter effort in this file"
 
 row = opts[opts["days"] >= 5].sort_values("days", ascending=False).iloc[0]
-S = iw.day_series(df, row.tt, row.cls)
+S = iw.day_series(df, row.tt, row.cls, iv=iv)
 print(f"   charting {row.tt} / {row.cls}: {len(S)} day(s)")
 assert len(S) >= 5
 
@@ -56,18 +66,22 @@ assert [x.split("·")[0] for x in bars.x] == dates, "the axis is a date axis"
 assert len(set(bars.x)) == len(bars.x), "two bars of one day would overlap"
 print(f"   {len(S)} bars, {len(set(dates))} days, {len(set(bars.x))} slots")
 
+# Every pair the picker offers with MORE bars than days must draw them on
+# distinct slots — this is the reported case: two intervals on one day.
 multi = opts[opts["bars"] > opts["days"]]
-if len(multi):
-    m = multi.iloc[0]
-    S2 = iw.day_series(df, m.tt, m.cls)
+assert len(multi), "no pair draws two efforts of one class on one day"
+for m in multi.itertuples():
+    S2 = iw.day_series(df, m.tt, m.cls, iv=iv)
     xs = list(_day_figure(S2, m.tt, m.cls).data[0].x)
-    assert len(xs) == len(S2) == int(m.bars), (len(xs), len(S2), int(m.bars))
-    assert len(set(xs)) == len(xs), "a two-effort day drew overlapping bars"
+    assert len(xs) == len(S2) == int(m.bars), (m.tt, m.cls, len(xs), len(S2),
+                                               int(m.bars))
+    assert len(set(xs)) == len(xs), f"{m.tt}/{m.cls}: overlapping bars"
     d2 = [str(pd.Timestamp(d).date()) for d in S2["day"]]
     assert sum("·" in x for x in xs) == len(d2) - len(set(d2)), \
-        "only a day's later bars may be indexed"
+        f"{m.tt}/{m.cls}: only a day's later bars may be indexed"
     assert all(x.split("·")[0] == str(pd.Timestamp(d).date())
-               for x, d in zip(xs, S2["day"]))
+               for x, d in zip(xs, S2["day"])), \
+        f"{m.tt}/{m.cls}: a bar left its own date"
     print(f"   {m.tt} / {m.cls}: {len(S2)} bars over {int(m.days)} day(s), "
           f"every bar on its own slot")
 

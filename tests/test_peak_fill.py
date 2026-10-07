@@ -234,6 +234,13 @@ else:
     print(f"   PASS  rebuild: {len(reb)} whole effort(s) with the meter "
           f"window replaced, guards and short side unchanged")
 
+    # the Set-evolution tab runs the quality screen AFTER the fill; a rebuild
+    # that the screen then deleted would never reach the reader
+    clean2, _rep2, _drop2 = quality_gates(filled2)
+    kept2 = int((clean2["Source"] == REBUILD_SRC).sum())
+    print(f"   quality gates keep {kept2} of {len(reb)} rebuilt row(s)")
+    assert kept2 > 0, "the quality screen deleted every rebuilt effort"
+
     # the complaint: 20-minute FTP sessions were invisible here
     from ml.set_evolution import add_signatures
     from ml.type_comparison import dur_class_label, prep_types
