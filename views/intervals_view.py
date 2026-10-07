@@ -728,18 +728,21 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         "sessions, its own watts, its own trend. An 8-minute threshold set "
         "and a 20-minute one are different series and are never averaged "
         "together. **Duration is the length of ONE interval (a rep)** — "
-        "never the workout length — rounded to whole minutes with halves "
-        "going down: up to 3.5 min is a \"3 min\" effort, more than 3.5 min "
-        "is \"4 min\", and the same rule applies at every minute (2.5–3.5 → "
-        "3 min, 3.5–4.5 → 4 min …). The detector wobbles ±10 s on the same "
-        "programmed effort, so finer classes would split one workout into "
-        "two fake series; a 30 s rep keeps its real-world 30 s. "
+        "never the workout length — rounded to the closest nominal, 5 minutes "
+        "at a time from ten minutes up: a 20:07 reads \"20 min\", a 24:47 "
+        "reads \"25 min\", and the same closest-number rule applies at every "
+        "step (an exact 22:30 goes up to 25). Below ten minutes the minutes "
+        "stay whole halves-down — up to 3.5 min is a \"3 min\" effort, more "
+        "than 3.5 min is \"4 min\" — and the detector wobbles ±10 s on the "
+        "same programmed effort, so finer classes would split one workout "
+        "into two fake series; a 30 s rep keeps its real-world 30 s. "
         "Every row of the detail table still shows the exact measured "
         "length. **The selector at the bottom of this tab then groups those "
-        "whole minutes into the length classes Evolution charts with — "
-        "5-10 min, 10-20 min, 20-30 min — because a 20:00, a 22:00 and a "
-        "24:00 are the same 20-minute effort on that chart; the table above "
-        "keeps them apart, the detail below gathers them.** "
+        "durations into the length classes Evolution charts with — "
+        "anything under 22:00 is 10-20 min, anything under 32:00 is 20-30 "
+        "min — because a 20:00, a 20:07 and a 21:00 are the same 20-minute "
+        "effort on that chart; the table above keeps them apart, the detail "
+        "below gathers them.** "
         "**The grouping is YOUR training type** — the label the "
         "session was filed under (FTP, VO2MAX, BILLAT, AEROBIC BASE …), "
         "not a guess from the rep length; only sessions with no label fall "
@@ -864,11 +867,10 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                               key="iv_type_fam")
     fam = fam_lab[fam_choice]
     gf = res["sets"][res["sets"]["family"] == fam]
-    # The options are Evolution's rep-length bands, NOT whole minutes: "20 min"
-    # used to hold only the sessions that read exactly 20:00, while the same
-    # work ridden as a 21:00, 22:00 or 24:00 (the peak meter's window for a
-    # 20-minute effort) was filed under its own one-session option and read as
-    # lost. One criterion, so one session list on both pages.
+    # The options are Evolution's rep-length bands with the athlete's own
+    # tolerance: anything under 22:00 is "10-20 min", so a 20:00, a 20:07
+    # and a 21:00 sit in ONE option instead of three — one criterion, one
+    # session list on both pages.
     dur_lab = duration_options(gf)
     dur_choice = st.selectbox("2 · Duration class — the length of ONE "
                               "interval", list(dur_lab), key="iv_type_dur")

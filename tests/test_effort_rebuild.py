@@ -118,7 +118,7 @@ check("19:17 and 20:07 — the two runs, to the second",
       sorted(int(s) for s in reb["secs"]))
 check("each run is filed in the class of ITS OWN length, never the meter's",
       dict(zip(reb["secs"], reb["cls"]))[1157] == "10-20 min"
-      and dict(zip(reb["secs"], reb["cls"]))[1207] == "20-30 min",
+      and dict(zip(reb["secs"], reb["cls"]))[1207] == "10-20 min",
       dict(zip(reb["secs"], reb["cls"])))
 check("every rebuilt row states the window that vouches for it",
       bool((reb["peak_s"] == 1320).all()) and bool((reb["peak_w"] == 244).all()))
@@ -141,7 +141,7 @@ print("3. what stops the rebuild")
 print("=" * 74)
 
 whole = _iv([("WORK", 1300, 244), ("RECOVERY", 300, 80)])
-check("the detector already reported an effort of the window's class",
+check("the detector already reported an effort of about the window's length",
       not len(iw.rebuilt_efforts(whole, REPORTED_DF)),
       "a whole 21:40 row already tells this story")
 
@@ -187,8 +187,8 @@ check("every row's class is its own length's class",
 
 S20 = iw.day_series(REPORTED_DF, "FTP", "20-30 min", iv=REPORTED)
 S10 = iw.day_series(REPORTED_DF, "FTP", "10-20 min", iv=REPORTED)
-check("one day, both of its efforts, each in the class its length names",
-      len(S20) == 1 and len(S10) == 1,
+check("one day, both of its efforts, together in the class their length names",
+      len(S20) == 0 and len(S10) == 2,
       (len(S20), len(S10)))
 both = pd.concat([S20, S10]).sort_values("secs")
 check("both efforts are on 30 Sep and neither was dropped",
@@ -196,8 +196,8 @@ check("both efforts are on 30 Sep and neither was dropped",
       and all(str(d) == "2026-09-30" for d in pd.to_datetime(both["day"])
               .dt.strftime("%Y-%m-%d")),
       both["secs"].tolist())
-check("the day's own average is the plain mean of its bars, class by class",
-      abs(float(S20["day_avg"].iloc[0]) - float(S20["w"].iloc[0])) < 1e-9)
+check("the day's own average is the plain mean of its bars",
+      abs(float(S10["day_avg"].iloc[0]) - float(S10["w"].mean())) < 1e-9)
 check("one ride that drew two bars is still one ride",
       int(both["n_sessions"].iloc[0]) == 1)
 
@@ -209,7 +209,7 @@ same_day = _iv([
     ("WORK", 601, 246), ("RECOVERY", 900, 80),
 ], day="2026-09-30")
 same_df = _df([{"id": "i1", "date": "2026-09-30", "pw": 245.0, "ps": 1250.0}])
-Sboth = iw.day_series(same_df, "FTP", "20-30 min", iv=same_day)
+Sboth = iw.day_series(same_df, "FTP", "10-20 min", iv=same_day)
 check("two efforts of one class on one day draw two bars",
       len(Sboth) == 2, len(Sboth))
 check("and the two bars sit on one day with one session behind them",
@@ -218,7 +218,7 @@ check("the day average is the mean of those two bars",
       abs(float(Sboth["day_avg"].iloc[0])
           - float(Sboth["w"].mean())) < 1e-9)
 O = iw.day_options(same_df, iv=same_day)
-row = O[(O["tt"] == "FTP") & (O["cls"] == "20-30 min")].iloc[0]
+row = O[(O["tt"] == "FTP") & (O["cls"] == "10-20 min")].iloc[0]
 check("the picker counts 1 day, 2 bars, 1 session — and bars == what is drawn",
       int(row["days"]) == 1 and int(row["bars"]) == 2
       and int(row["sessions"]) == 1,

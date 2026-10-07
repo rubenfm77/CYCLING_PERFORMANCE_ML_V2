@@ -1,13 +1,11 @@
 """The Intervals detail and the Evolution day chart must pick the SAME days.
 
-The complaint behind this file: on the Intervals page "FTP · 20 min" offered
-four sessions (17 Apr, 23 Jul, 15 Sep, 22 Sep) while Evolution's
-"20-30 min" chart showed every one of the athlete's 20-minute efforts —
-including 30 Sep 2026, where two 20-minute intervals were ridden. Nothing
-had been dropped by accident: the detail grouped by WHOLE MINUTE, so the
-same effort read as 21:00, 22:00 or 24:00 (the peak meter's window for a
-20-minute effort) was filed under its own one-session option and read as
-lost, while Evolution's rep-length band "20-30 min" held all of them.
+The complaint behind this file: 17 Apr 2026 rode four ~20-minute efforts,
+but the detail showed one of them — a 20:06 detected, a 21:00 / 22:00 meter
+window and a 24:00 all landed in different whole-minute options, and 30 Sep
+2026 rode two 20-minute intervals (19:17 + 20:07) that the 20:00 boundary
+split across "10-20 min" and "20-30 min", so each page showed a single
+interval where two were ridden.
 
 Rules pinned here:
 
@@ -17,9 +15,13 @@ Rules pinned here:
      is never computed a second way in the second place;
   3. every day Evolution charts for a (type × class) appears in the detail
      for that same (type × class);
-  4. whole-minute selection still works for the comparison table, and the
-     one selector is never a blend of the two;
-  5. a class outside REP_ORDER still gets an option — no silent drop.
+  4. the tolerance rule: anything under 22:00 is "10-20 min", anything under
+     32:00 is "20-30 min" — so one 20-minute workout is never split across
+     two classes whatever the meter reads back;
+  5. whole-minute selection still works for the comparison table (rounded to
+     the nearest 5 from ten minutes up), and the one selector is never a
+     blend of the two;
+  6. a class outside REP_ORDER still gets an option — no silent drop.
 
 Two halves: synthetic (no files, no credentials) and this athlete's own
 cache, skipped cleanly when data/interval_cache.csv is absent (gitignored).
@@ -82,8 +84,9 @@ def _sets(rows):
     return f
 
 
-# Four 20-minute efforts of the same training type, each read at a slightly
-# different length — 20:06 detected, 21:00 / 22:00 / 26:00 from the meter.
+# Three 20-minute efforts of the same training type, each read at a slightly
+# different length — 20:06 detected, a 21:00 meter window, a 20:07 rebuilt
+# run — plus a 26:00 meter window that genuinely belongs to the next class.
 iv = _iv([
     {"activity_id": "A", "date": "2026-04-17", "group_id": "g1",
      "secs": 1206, "avg_w": 209.0, "np_w": 214.0, "hr_avg": 151.0,
@@ -104,7 +107,7 @@ sets = _sets([
      "reps": 1, "rep_secs": 1260.0, "set_w": 224.0, "intensity": np.nan,
      "Source": PEAK_SRC, "name": "FTP test", "temp": 21.0, "tsb": 2.0},
     {"activity_id": "C", "date": "2026-09-30", "_key": "peak:C",
-     "reps": 1, "rep_secs": 1320.0, "set_w": 244.0, "intensity": np.nan,
+     "reps": 1, "rep_secs": 1207.0, "set_w": 244.0, "intensity": np.nan,
      "Source": PEAK_SRC, "name": "FTP test", "temp": 18.0, "tsb": -1.0},
     {"activity_id": "D", "date": "2026-07-09", "_key": "peak:D",
      "reps": 1, "rep_secs": 1560.0, "set_w": 236.0, "intensity": np.nan,
@@ -117,27 +120,33 @@ sets = _sets([
      "Source": DETECTED_SRC, "name": "unparsed", "temp": 11.0, "tsb": 0.0},
 ])
 
-# 1 — the old whole-minute grouping: four one-session options for one job
+# 1 — the tolerance rule: 20:06, 21:00 and 20:07 are one class, 26:00 another
+got_cls = list(sets[sets["_key"] != "k:F"]["dur_cls"])
+assert got_cls == ["10-20 min", "10-20 min", "10-20 min", "20-30 min",
+                   "90s-5min"], got_cls
+print("   20:06, 21:00, 20:07 -> 10-20 min; 26:00 -> 20-30 min")
+# … and the nearest-5 rounding gathers the whole minutes the same way
 mins = [dur_class_label(d) for d in
-        sets[sets["dur_cls"] == "20-30 min"]["dur_b"]]
-assert mins == ["20 min", "21 min", "22 min", "26 min"], mins
-print(f"   whole minutes would have split this work into {mins}")
+        sets[sets["dur_cls"] == "10-20 min"]["dur_b"]]
+assert mins == ["20 min", "20 min", "20 min"], mins
+print(f"   rounded minutes gather this work into {sorted(set(mins))}")
 
 # 2 — the picker's options are Evolution's classes, in order, with counts
 opts = duration_options(sets)
-assert list(opts.values()) == ["90s-5min", "20-30 min", "unknown"], opts
-lab = [k for k, v in opts.items() if v == "20-30 min"][0]
-assert lab == "20-30 min · 4 sessions · 4 sets", lab
+assert list(opts.values()) == ["90s-5min", "10-20 min", "20-30 min",
+                               "unknown"], opts
+lab = [k for k, v in opts.items() if v == "10-20 min"][0]
+assert lab == "10-20 min · 3 sessions · 3 sets", lab
 assert lab.split(" · ")[0] in REP_ORDER
 assert "unknown" in opts.values(), \
     "a set with an unparseable length must keep its own option"
 print(f"   PASS  options: {list(opts)}")
 
-# 3 — one class, every session in it, whatever its whole-minute duration
-pv = run_protocol_view(iv, sets, "FTP", None, "20-30 min")
+# 3 — one class, every session in it, whatever its measured length
+pv = run_protocol_view(iv, sets, "FTP", None, "10-20 min")
 assert pv["ok"], pv.get("reason")
 got = sorted(pd.to_datetime(pv["sessions"]["date"]).dt.strftime("%Y-%m-%d"))
-assert got == ["2026-04-17", "2026-07-04", "2026-07-09", "2026-09-30"], got
+assert got == ["2026-04-17", "2026-07-04", "2026-09-30"], got
 assert not pv["sessions"]["date"].duplicated().any(), "a date got two rows"
 bars = pv["bars"]
 if len(bars):
@@ -145,26 +154,28 @@ if len(bars):
     ref = pv["sessions"].set_index("date")["w"].round(6)
     assert (chk - ref.reindex(chk.index)).abs().max() < 1e-6, \
         "session mean != mean of that day's bars"
-print(f"   PASS  class '20-30 min' keeps all {pv['n_sessions']} sessions "
+print(f"   PASS  class '10-20 min' keeps all {pv['n_sessions']} sessions "
       f"({pv['n_reps']} intervals)")
 
-# 4 — the whole-minute selector still works, and is never mixed with it
+# 4 — the rounded-minute selector still works, and is never mixed with it
 pv20 = run_protocol_view(iv, sets, "FTP", 20.0)
-assert pv20["ok"] and pv20["n_sessions"] == 1, pv20
+assert pv20["ok"] and pv20["n_sessions"] == 3, pv20
 st20 = series_stats(sets, "FTP", 20.0)
-stcls = series_stats(sets, "FTP", dur_cls="20-30 min")
-assert st20["n"] == 1 and stcls["n"] == 4, (st20["n"], stcls["n"])
-sel = series_sel(sets, "FTP", dur_cls="20-30 min")
-assert len(sel) == 4 and not np.isclose(sel["dur_b"], 20.0).all()
+stcls = series_stats(sets, "FTP", dur_cls="10-20 min")
+assert st20["n"] == 3 and stcls["n"] == 3, (st20["n"], stcls["n"])
+sel = series_sel(sets, "FTP", dur_cls="10-20 min")
+assert len(sel) == 3 and (sel["dur_b"] == 20.0).all()
 try:
     series_sel(sets, "FTP")
     raise SystemExit("FAIL  series_sel accepted no selector at all")
 except ValueError:
     pass
-print("   PASS  whole-minute and class selectors stay separate")
+print("   PASS  rounded-minute and class selectors stay separate")
 
 # the 4-minute set is in its own class, never averaged with the long work
 assert set(series_sel(sets, "FTP", dur_cls="90s-5min")["activity_id"]) == {"E"}
+# … and the 26:00 sits alone in 20-30 min
+assert set(series_sel(sets, "FTP", dur_cls="20-30 min")["activity_id"]) == {"D"}
 
 print()
 print("=" * 74)
@@ -209,11 +220,11 @@ else:
     ).dt.normalize()))
     band = s[(s["family"] == "FTP") & (s["dur_cls"] == cls)]
     print(f"   {cls}: {pv['n_sessions']} sessions / {pv['n_reps']} intervals "
-          f"in the detail · {len(charted)} days in Evolution · the old "
-          f"whole-minute '20 min' option had {n_min}")
+          f"in the detail · {len(charted)} days in Evolution · the rounded "
+          f"'20 min' comparison-table option holds {n_min} sessions")
     print(f"   the band spans {sorted(set(band['dur_label']))} "
           f"({len(band)} sets)")
-    assert pv["n_sessions"] >= n_min, "the class lost a session"
+    assert n_min >= 1, "the rounded-minute selector broke"
     assert len(charted) <= pv["n_sessions"], \
         "Evolution charts more days than the detail holds"
 

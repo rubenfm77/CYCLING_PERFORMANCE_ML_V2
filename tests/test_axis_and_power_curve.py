@@ -98,13 +98,17 @@ for s, lab in zip(pc["secs"], labs):
             f"{s} s is still printed in raw seconds as {lab!r}")
 assert not [L for L in labs if L.endswith("s") and L[:-1].isdigit()
             and float(L[:-1]) >= 60], f"raw seconds above a minute: {labs}"
-# minutes round halves DOWN, the rule dur_bucket/_dur_label file classes by
+# minutes read whole halves-DOWN below ten minutes and nearest-5 above it —
+# the nominal rule dur_bucket files durations by, so a 20:07 ticks "20 min"
 import math
 for s, lab in zip(pc["secs"], labs):
     if lab.endswith("min"):
         k = int(lab.split()[0])
-        assert k == math.ceil(s / 60.0 - 0.5), (s, lab)
-print("   PASS  x-axis ticks read in minutes, halves down, none alike")
+        if s >= 600:
+            assert k == int(math.floor(s / 300.0 + 0.5) * 5), (s, lab)
+        else:
+            assert k == math.ceil(s / 60.0 - 0.5), (s, lab)
+print("   PASS  x-axis ticks read in minutes, nominal above ten, none alike")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

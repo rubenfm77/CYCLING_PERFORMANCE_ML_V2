@@ -118,11 +118,13 @@ def fmt_min(secs, decimals: int = 0) -> str:
     interval shorter than a minute, MINUTES from one minute up. A 30 s
     interval is not "0 min" — that is the real-world protocol unit — and a
     75 s one is not printed in seconds either, because it is a minute of
-    work. Everything from a minute up is WHOLE minutes by the same
-    halves-DOWN class rule dur_bucket uses, so a printed duration and the
-    group it belongs to can never disagree: 2:59 says "3 min" and lands in
-    "3 min", 3:30 says "3 min" and lands in "3 min" too. decimals=1 restores
-    the 1-decimal form for audit tables that want the exact measured length."""
+    work. Below ten minutes the print is WHOLE minutes by the halves-DOWN
+    class rule dur_bucket uses; from ten minutes up it is the NEAREST 5
+    (half up), the same nominal rule — so a printed duration and the group
+    it belongs to can never disagree: 2:59 says "3 min" and lands in "3 min",
+    20:07 says "20 min" and lands in "20 min", 24:47 says "25 min" and lands
+    in "25 min". decimals=1 restores the 1-decimal form for audit tables
+    that want the exact measured length."""
     try:
         s = float(secs)
     except (TypeError, ValueError):
@@ -132,6 +134,8 @@ def fmt_min(secs, decimals: int = 0) -> str:
     if s < 60:
         return f"{s:.0f} s"
     if decimals <= 0:
+        if s >= 600:
+            return f"{int(np.floor(s / 300.0 + 0.5) * 5):.0f} min"
         return f"{np.ceil(s / 60.0 - 0.5):.0f} min"
     return f"{s / 60:.{decimals}f} min"
 
@@ -162,15 +166,25 @@ def fmt_rest(secs) -> str:
 
 
 def dur_bucket(secs) -> float:
-    """Rep length → duration CLASS in minutes. Whole minutes, halves DOWN:
-    ≤ 3.5 min → 3, > 3.5 → 4, ≤ 4.5 → 4, > 4.5 → 5 … Under 45 s the
-    class stays in seconds (0 = ≤ 15 s, 0.5 = 30 s)."""
+    """Rep length → duration class in minutes. Whole minutes halves-DOWN
+    below ten minutes; the NEAREST 5 minutes (half up) from ten minutes up.
+
+    Below ten minutes the detector's ±10 s wobble is smaller than the minute,
+    so whole minutes keep distinct protocols apart (≤ 3.5 min → 3, > 3.5 → 4,
+    ≤ 4.5 → 4, > 4.5 → 5 …). From ten minutes up the same wobble was filing
+    one 20-minute workout under "20 min", "21 min", "24 min", "25 min",
+    "26 min" and "28 min" — six one-session series for one job — so those
+    round to the closest nominal (20:07 → 20, 24:47 → 25, 28:22 → 30, an
+    exact 22:30 going up to 25). Under 45 s the class stays in seconds
+    (0 = ≤ 15 s, 0.5 = 30 s): a 30 s rep is never merged into a minute."""
     try:
         s = float(secs)
     except (TypeError, ValueError):
         return 0.0
     if s < SUB_MIN_CUT_S:
         return 0.0 if s < 15.0 else 0.5
+    if s >= 600.0:
+        return float(int(np.floor(s / 300.0 + 0.5) * 5))
     return float(np.ceil(s / 60.0 - 0.5))
 
 
@@ -190,10 +204,10 @@ def duration_options(g: pd.DataFrame) -> dict:
     The options are the rep-length classes of `ml.interval_watts.REP_ORDER`
     — the very classes the Evolution day chart and the Fitness class lines
     use — in ascending order, each carrying its own session and set counts.
-    Whole-minute durations are deliberately NOT offered here: "20 min" held
-    only the four sessions that happened to read 20:00 while the athlete's
-    other 20-minute work (a 21:00, a 22:00, a 24:00) was filed under its own
-    single-session option and read as lost.
+    Whole-minute durations are deliberately NOT offered here: one 20-minute
+    workout read back as 20:03, 20:07 and 21:00 would otherwise be filed
+    under three single-session options and read as lost. One criterion, so
+    one session list on both pages.
 
     Nothing is dropped: a class outside REP_ORDER (an unparseable length,
     "unknown") still gets its own entry at the end rather than vanishing
@@ -286,9 +300,10 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
                   pd.to_numeric(s["rep_secs"], errors="coerce")]
     s["dur_label"] = [dur_class_label(b) for b in s["dur_b"]]
     # The rep-LENGTH class, the criterion the Evolution day chart and the
-    # Fitness class lines draw with ("20-30 min" holds 20:00 … 26:00, so a
-    # session whose peak meter reads 22:00 is still the athlete's 20-minute
-    # work). `dur_b` above stays whole-minute for the comparison table — a
+    # Fitness class lines draw with (anything under 22:00 is "10-20 min", so
+    # a session whose peak meter reads 20:07 is still the athlete's 20-minute
+    # work, and a 30:07 still sits in "20-30 min"). `dur_b` above rounds to
+    # the nearest 5 minutes from ten minutes up for the comparison table — a
     # 30 s rep is never merged with an 80 s one — but the detail at the
     # bottom of the Intervals page is selected with this class, so both
     # pages chart the same days for the same work instead of the Intervals
@@ -544,9 +559,11 @@ def series_sel(s: pd.DataFrame, family: str, dur_b=None,
                dur_cls: str | None = None) -> pd.DataFrame:
     """The rows of ONE series: training type × duration, by ONE criterion.
 
-    `dur_b` is the whole-minute class of the comparison table (an 8-minute
-    set never meets a 20-minute one). `dur_cls` is the rep-length class the
-    Evolution day chart draws with ("20-30 min" spans 20:00 to 26:00). The
+    `dur_b` is the rounded duration of the comparison table (nearest 5 from
+    ten minutes up, so an 8-minute set never meets a 20-minute one).
+    `dur_cls` is the rep-length class the
+    Evolution day chart draws with ("10-20 min" holds anything under 22:00).
+    The
     detail at the bottom of the Intervals page selects with `dur_cls`, so
     the same criterion produces the same days on both pages. Exactly one of
     the two is honoured — never a blend of the two.

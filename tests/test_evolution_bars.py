@@ -1,9 +1,10 @@
 """Every bar of the Evolution day chart must print its own numbers.
 
 The chart is only honest if the reader never has to take a measurement off the
-geometry: the watts and the exact interval length are printed above each bar,
-the bar height is that same un-averaged interval watts, and the truncated
-y-axis floor is stated in the subtitle next to the floor that was applied.
+geometry: the watts and the nominal interval length (nearest 5 minutes) are
+printed above each bar, the exact length rides in the hover, the bar height
+is that same un-averaged interval watts, and the truncated y-axis floor is
+stated in the subtitle next to the floor that was applied.
 
 Run: python -c "from tests import test_evolution_bars"
 """
@@ -40,11 +41,12 @@ assert len(S) >= 5
 fig = _day_figure(S, row.tt, row.cls)
 bars = fig.data[0]
 
-print("2. every bar carries its watts and its exact length")
-for w, s, lab in zip(S["w"], S["secs"], bars.text):
+print("2. every bar carries its watts and its nominal length; hover keeps exact")
+for w, s, lab, cd in zip(S["w"], S["secs"], bars.text, bars.customdata):
     lab = str(lab)
     assert f"{iw.fmt_watts(w)} W" in lab, (w, lab)
-    assert iw.fmt_rep(s) in lab, (s, lab)
+    assert iw.fmt_axis_dur(s) in lab, (s, lab)
+    assert iw.fmt_rep(s) in str(cd[0]), (s, cd[0])
 print(f"   e.g. {str(bars.text[0]).replace(chr(10), ' / ')}")
 
 print("3. bar height is the interval's own watts, never an average")

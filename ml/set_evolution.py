@@ -361,10 +361,17 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
                                 for x in have)]
             if kept:
                 for q in kept:
+                    # Which detector rows this run was joined from (its seq
+                    # numbers): the detail must not draw those fragments as
+                    # separate bars next to the run that contains them.
+                    _rs = (tuple(float(x) for x in q.seqs)
+                           if "seqs" in hits.columns and q.seqs is not None
+                           else ())
                     rows.append({
                         "activity_id": act, "date": r.date,
                         "_key": f"rebuilt:{act}:{float(q.secs):.0f}s",
                         "reps": 1, "rep_secs": float(q.secs), "set_w": float(q.w),
+                        "run_seqs": _rs,
                         "set_np": np.nan, "set_hr": np.nan, "intensity": np.nan,
                         "load": np.nan, "cad": np.nan, "decoupling": np.nan,
                         "first_seq": np.nan, "last_seq": np.nan, "rest": np.nan,
@@ -405,6 +412,8 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
     if not rows:
         return src, 0
 
+    if "run_seqs" not in src.columns:
+        src = src.assign(run_seqs=[tuple()] * len(src))
     add = pd.DataFrame(rows).reindex(columns=list(src.columns))
     out = pd.concat([src, add], ignore_index=True, sort=False)
     return _with_context(out, df_all), len(rows)
@@ -418,9 +427,12 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
 #      (a) same start second + a shared identical interval row (the re-synced
 #          copy: 47 pairs in this cache, segmented differently so row counts
 #          and interval totals differ), (b) same day, same moving time, same
-#      raw interval rows (the older screen, 4 pairs). Counting both would
+#      raw interval rows (the older screen). Counting both would
 #      double-count the workout, so the duplicate activity is removed — and
-#      the copy that survives is the one the athlete's file labels;
+#      the coherent copy wins, not always the labelled one: a copy whose
+#      longest block reads softer than half its hardest merged work into
+#      recovery. It wins even when it is unlabelled, then inherits the
+#      ride's label, and the swap is reported, never silent;
 #   2. efforts HOURS apart sharing one group_id — a "2 × 3 min set" with a
 #      49-minute gap is two separate efforts, so the set average and the rest
 #      figure are both invalid: excluded;
@@ -438,8 +450,14 @@ MAX_PLAUSIBLE_IF = 150.0        # > 150 % IF comes from very short rows
 DEDUPE_MT_TOL_S = 60.0          # duplicate ride: same moving time ± 60 s …
 DEDUPE_IV_TOL_S = 30.0          # … and same total interval seconds ± 30 s
 DEDUPE_DIST_TOL_M = 300.0       # … and same interval distance ± 300 m
+# A duplicate copy whose longest set reads below this fraction of its own
+# hardest set merged work into recovery when it segmented the ride — it is
+# incoherent, and the coherent copy wins even unlabelled.
+COHERENT_MIN_RATIO = 0.5
 
 DUP_REASON = "duplicate ride (synced twice)"
+SWAP_REASON = ("duplicate ride — coherent copy kept "
+               "(labelled copy mis-segmented)")
 GAP_REASON = "gaps too long — not one protocol"
 SHORT_FLAG = "sub-15 s reps — IF unusable"
 IF_FLAG = "IF > 150 % — model artefact on short efforts"
@@ -451,8 +469,14 @@ QUALITY_REASONS = {
                 "it starts at the same second and shares an identical interval "
                 "row (or, when no start is available, it matches another row "
                 "set on the same day, moving time and interval totals) — "
-                "counting both would double-count the workout, so the copy the "
-                "athlete's own file does not label is the one removed",
+                "counting both would double-count the workout, so one copy is "
+                "removed",
+    SWAP_REASON: "the same ride is in the cache twice and the labelled copy's "
+                 "own segmentation merged work into recovery (its longest "
+                 "block reads softer than its other blocks) while the other "
+                 "copy segmented the intervals coherently — the coherent copy "
+                 "is kept so the intervals are not lost, and the swap is "
+                 "stated here instead of happening silently",
     GAP_REASON: "reps sit minutes-to-hours apart; one block, not an "
                 "interval set — the average and the rest figure are invalid",
     SHORT_FLAG: "detector rows under 15 s: watts kept, intensity discarded",
@@ -480,16 +504,18 @@ def quality_gates(sets: pd.DataFrame):
 
     # 1 — duplicate rides, decided at ACTIVITY level, not set level
     dup_act = pd.Series(False, index=s.index)
+    swap_act = pd.Series(False, index=s.index)
     keep_start = set()          # copies the start-second rule decides to keep
     # 1b — the same ride under a SECOND activity id. The moving-time screen
     # below cannot see these: the re-synced copy is segmented differently, so
     # its row count and its total interval seconds differ. What it cannot
     # change is WHEN the ride began or the watts of a shared row. Rule: two
     # activity ids starting at the same second with at least one byte-identical
-    # interval row are one ride synced twice, and the copy that survives is the
-    # one the athlete's own file labels — so the workout keeps its training
-    # type instead of falling back to a heuristic family, and the ride is
-    # counted once instead of twice.
+    # interval row are one ride synced twice, and the copy that survives is
+    # the coherent one — coherent by the longest-set rule above — so the
+    # workout keeps its intervals instead of a merged work-into-recovery
+    # block, and the ride is counted once instead of twice. A swap away
+    # from the labelled copy is reported under SWAP_REASON, never silently.
     if "act_start" in s.columns and "act_iv_rows" in s.columns:
         _lab = (s["db_type"].astype(str).str.strip() if "db_type" in s.columns
                 else pd.Series("", index=s.index))
@@ -499,12 +525,53 @@ def quality_gates(sets: pd.DataFrame):
                               "rows": s["act_iv_rows"],
                               "lab": _lab.ne("").astype(int)})
                 .drop_duplicates("activity_id"))
+        # Coherence of one copy's own segmentation: the watts of its LONGEST
+        # set against the watts of its HARDEST set. A copy that files
+        # a 24:47 block at 119 W next to 12-minute blocks at 245 W and a
+        # 410 W sprint (22 Apr 2026: the labelled copy's longest set reads
+        # 0.29× its hardest) merged the work into the recovery when it
+        # segmented the ride, while the other copy's longest block reads
+        # 0.60×. Below 0.5× the copy is incoherent — and the coherent copy
+        # wins even when it is the unlabelled one, because a label names the
+        # workout, it does not repair a broken segmentation. Ties (identical
+        # rows, both coherent, both incoherent) keep the old label-first
+        # order, so nothing that used to pass changes its copy. The bar is
+        # deliberately at one half: a 20-minute threshold block next to
+        # 2-minute VO2 reps reads ~0.6× and is legitimate training, not a
+        # broken segmentation.
+        _sw = pd.to_numeric(s["set_w"], errors="coerce")
+        _coh = {}
+        for _aid, _g in s.groupby(s["activity_id"].astype(str), sort=False):
+            _w = _sw.loc[_g.index].dropna()
+            if len(_w) < 2 or float(_w.max()) <= 0:
+                _coh[_aid] = (True, 1.0)
+                continue
+            _r = (pd.to_numeric(s.loc[_g.index, "rep_secs"],
+                                errors="coerce").fillna(0))
+            _long_w = float(_w.loc[_r.idxmax()])
+            _ratio = _long_w / float(_w.max())
+            _coh[_aid] = (_ratio >= COHERENT_MIN_RATIO, _ratio)
+        _per["coh_ok"] = _per["activity_id"].map(
+            lambda a: _coh.get(a, (True, 1.0))[0]).astype(bool)
+        _per["coh"] = _per["activity_id"].map(
+            lambda a: _coh.get(a, (True, 1.0))[1]).astype(float)
         _dup_start = set()
+        _swap_start = set()  # dropped copies that CARRY the athlete's label:
+        # their segmentation lost to the coherent copy, and the report says
+        # so instead of counting them as plain duplicates
+        _swap_label = {}     # kept activity id -> the ride's label, inherited
+        # from the dropped labelled copy: the label names the RIDE (same
+        # start second = same ride), so the kept copy keeps FTP instead of
+        # falling back to a heuristic family
+        _typs = (s.groupby(s["activity_id"].astype(str))["db_type"].first()
+                 if "db_type" in s.columns else pd.Series(dtype=object))
         for _stv, _g in _per[_per["st"].notna()].groupby("st", sort=False):
             if len(_g) < 2:
                 continue
-            _g = _g.sort_values("lab", ascending=False, kind="stable")
-            _anchor = _g.iloc[0]                     # the labelled copy first
+            _g = _g.sort_values(["coh_ok", "lab", "coh"],
+                                ascending=[False, False, False],
+                                kind="stable")
+            _anchor = _g.iloc[0]                     # the coherent copy first
             keep_start.add(_anchor["activity_id"])
             for _ in range(1, len(_g)):
                 _r = _g.iloc[_]
@@ -513,8 +580,21 @@ def quality_gates(sets: pd.DataFrame):
                     bool(set(_rows_a) & set(_rows_b))
                 if _shared:
                     _dup_start.add(_r["activity_id"])
+                    if int(_r["lab"]) == 1 and int(_anchor["lab"]) == 0:
+                        _swap_start.add(_r["activity_id"])
+                        _lt = str(_typs.get(_r["activity_id"], "") or "")
+                        if _lt.strip():
+                            _swap_label.setdefault(_anchor["activity_id"],
+                                                    _lt.strip())
         if _dup_start:
             dup_act = dup_act | s["activity_id"].astype(str).isin(_dup_start)
+        swap_act = (s["activity_id"].astype(str).isin(_swap_start)
+                    if _swap_start else pd.Series(False, index=s.index))
+        for _aid, _lt in _swap_label.items():
+            _m = (s["activity_id"].astype(str) == _aid)
+            if "db_type" in s.columns:
+                _m = _m & (s["db_type"].astype(str).str.strip() == "")
+                s.loc[_m, "db_type"] = _lt
     have_fp = {"moving_time", "act_iv_n", "act_iv_secs"}.issubset(s.columns)
     if have_fp:
         mt = pd.to_numeric(s["moving_time"], errors="coerce")
@@ -549,6 +629,7 @@ def quality_gates(sets: pd.DataFrame):
 
     why = pd.Series("", index=s.index, dtype="object")
     why = why.mask(dup_act, DUP_REASON)
+    why = why.mask(swap_act.fillna(False).astype(bool), SWAP_REASON)
     why = why.mask(why.eq("") & too_gappy, GAP_REASON)
 
     # 3 — unreliable FIELDS: flagged, never deleted

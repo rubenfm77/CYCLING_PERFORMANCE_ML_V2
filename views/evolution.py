@@ -76,11 +76,13 @@ def _slot_labels(days) -> list:
 
 
 def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
-    """Bars of interval watts by day — watts and exact length on every bar.
+    """Bars of interval watts by day — watts and nominal length on every bar.
 
     Kept separate from the page so the labels and the axis floor can be
     asserted without a Streamlit session: everything a reader must not have to
-    estimate from geometry is printed on the chart itself.
+    estimate from geometry is printed on the chart itself. The nominal length
+    is the nearest 5 minutes; the exact length rides in the hover and the
+    table, never rounded away.
     """
     # Equal-width slot per bar: on a true date axis a 7-day gap gets one thin
     # sliver and the eye can't read it. Every charted bar gets the same width,
@@ -93,10 +95,12 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
     fig.add_trace(go.Bar(
         x=x_slots, y=S["w"], name="Interval watts",
         marker_color=C["accent"], opacity=0.9,
-        # Watts first (top line), exact length under it: the reader tracks the
-        # evolution off a printed number and still never loses how long that
-        # number was held for.
-        text=[f"{iw.fmt_watts(w)} W\n{iw.fmt_rep(s)}"
+        # Watts first (top line), nominal length under it: the reader tracks the
+        # evolution off a printed number and still knows which work it was —
+        # a 20:07 effort prints "20 min", a 24:47 "25 min". The EXACT length
+        # stays in the hover and in the table under the chart, so nothing is
+        # lost by the rounding.
+        text=[f"{iw.fmt_watts(w)} W\n{iw.fmt_axis_dur(s)}"
               for w, s in zip(S["w"], S["secs"])],
         textposition="outside", textfont=dict(color=C["muted"], size=10),
         customdata=[[iw.fmt_rep(r.secs), iw.fmt_watts(r.w),
@@ -163,7 +167,9 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
         "<br><sup>one equal-width slot per charted bar, in date order; a day "
         "that rode two efforts of this class draws two bars, indexed under "
         "the same date. The label above each bar is that interval's watts and "
-        "its exact length. The green line is each day's OWN average watts for "
+        "its nominal length — the nearest 5 minutes, so a 20:07 reads "
+        "\"20 min\" and a 24:47 \"25 min\"; the exact length is in the hover "
+        "and the table below. The green line is each day's OWN average watts for "
         "this class, drawn so the evolution can be read as a line rather than "
         "off bar heights. The dotted line is the average of the interval watts "
         "across the charted bars and is never averaged into the bars. The "
@@ -279,7 +285,7 @@ def _interval_by_day(ctx):
                            format_func=lambda c: c_lab.get(c, c),
                            key="evo_day_cls",
                            help="Intervals of different lengths are never mixed. "
-                                "A whole 20:00 sits in '20-30 min'; every bar and "
+                                "Anything under 22:00 sits in '10-20 min'; every bar and "
                                 "row below also shows its exact length.")
         if not c_opts:
             callout("Nothing to chart", f"No {tt} interval length is recorded.",

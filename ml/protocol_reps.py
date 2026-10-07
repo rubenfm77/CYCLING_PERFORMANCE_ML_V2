@@ -58,14 +58,21 @@ def _open_close(g: pd.DataFrame) -> tuple[float, float]:
     return op, cl
 
 
-def _set_members(iv: pd.DataFrame, sets_sel: pd.DataFrame) -> pd.DataFrame:
+def _set_members(iv: pd.DataFrame, sets_sel: pd.DataFrame
+                 ) -> tuple[pd.DataFrame, set]:
     """Raw WORK rows belonging to the selected sets (matched on
-    activity × group key; solo sets match on their own generated key)."""
+    activity × group key; solo sets match on their own generated key).
+
+    Returns (members, consumed): `consumed` holds the (activity_id, day,
+    set key) triples whose member rows all fell to the run-consumption rule
+    below, so the caller does not mistake them for sets with no evidence and
+    draw them a second time as solo bars.
+    """
     if iv is None or not len(iv) or sets_sel is None or not len(sets_sel):
-        return pd.DataFrame()
+        return pd.DataFrame(), set()
     w = iv[iv["iv_type"] == "WORK"].copy()
     if not len(w):
-        return w
+        return w, set()
     for c in ("secs", "avg_w", "np_w", "hr_avg", "intensity", "load",
               "cad_avg"):
         w[c] = pd.to_numeric(w[c], errors="coerce")
@@ -91,13 +98,52 @@ def _set_members(iv: pd.DataFrame, sets_sel: pd.DataFrame) -> pd.DataFrame:
     gkey = m["_gkey"].astype("string")
     out = m[(grp.notna() & (grp == gkey)) | (grp.isna() & (grp == gkey))]
     if not len(out):
-        return pd.DataFrame()
+        return pd.DataFrame(), set()
     out = out.drop_duplicates(subset=["activity_id", "seq", "_gkey"])
+    # Fragments a drawn run was joined from are NOT drawn a second time next
+    # to the run that contains them: a rebuilt set carries its parts' seq
+    # numbers in `run_seqs`, and any member row of this same selection that
+    # IS one of those parts falls out here. Matched on (activity, seq), never
+    # on bare length — a second effort that merely reads the same seconds is
+    # a different row and stays. Sets outside this selection are unaffected:
+    # their rows were never going to be drawn here anyway.
+    consumed: set = set()
+    if "run_seqs" in keyed.columns or "run_seqs" in sets_sel.columns:
+        _rs = (sets_sel["run_seqs"] if "run_seqs" in sets_sel.columns
+               else keyed["run_seqs"])
+        _sup = set()
+        for _aid, _gkey_v, _rq in zip(sets_sel["activity_id"].astype(str),
+                                     sets_sel["_key"].astype(str), _rs):
+            try:
+                _items = (tuple(_rq) if not isinstance(_rq, tuple)
+                          else _rq)
+            except TypeError:
+                continue
+            for _sq in _items or ():
+                try:
+                    _sup.add((_aid, float(_sq)))
+                except (TypeError, ValueError):
+                    continue
+        if _sup:
+            _mseq = pd.to_numeric(out["seq"], errors="coerce")
+            _keep = np.array(
+                [((_a, float(_s)) not in _sup if np.isfinite(_s) else True)
+                 for _a, _s in zip(out["activity_id"].astype(str), _mseq)],
+                dtype=bool)
+            for _a, _d, _g, _k in zip(
+                    out["activity_id"].astype(str),
+                    pd.to_datetime(out["date"]).dt.normalize(),
+                    out["_gkey"].astype(str), _keep):
+                if not _k:
+                    consumed.add((_a, _d, _g))
+            out = out[_keep]
+            if not len(out):
+                return pd.DataFrame(), consumed
     out = out.sort_values(["date", "activity_id", "seq"])
     key_cols = ["date", "activity_id", "_gkey"]
     out["rep_idx"] = out.groupby(key_cols).cumcount() + 1
     out["reps_in_set"] = out.groupby(key_cols)["seq"].transform("size")
-    return out
+    return out, consumed
 
 
 BAR_COLS = ["date", "activity_id", "_gkey", "name", "seq", "rep_idx",
@@ -105,7 +151,8 @@ BAR_COLS = ["date", "activity_id", "_gkey", "name", "seq", "rep_idx",
             "cad_avg", "tsb", "temp", "src"]
 
 
-def _uncovered_sets(sel: pd.DataFrame, reps: pd.DataFrame) -> pd.DataFrame:
+def _uncovered_sets(sel: pd.DataFrame, reps: pd.DataFrame,
+                    consumed: set | None = None) -> pd.DataFrame:
     """The selected sets that own NO raw member row.
 
     `_set_members` returns one row per raw WORK interval the detector
@@ -115,14 +162,22 @@ def _uncovered_sets(sel: pd.DataFrame, reps: pd.DataFrame) -> pd.DataFrame:
     set whose rows were pruned. Such a set used to fall out of the bars AND
     out of the session line without a word — which is how "FTP · 20 min"
     ended up showing one session of the four that were selected.
+
+    `consumed` holds (activity_id, set key) pairs whose rows were all
+    swallowed by a drawn run of the same selection: they are evidence seen
+    whole, not missing evidence, so they are covered and never solo-drawn.
     """
     if not len(sel) or "_key" not in sel.columns:
         return sel.iloc[0:0]
     if reps is None or not len(reps) or "_gkey" not in reps.columns:
-        return sel                      # nothing was segmented: none covered
+        if not (consumed or set()):
+            return sel                    # nothing was segmented: none covered
+        reps = reps if reps is not None else pd.DataFrame()
     have = set(zip(reps["activity_id"].astype(str),
                    pd.to_datetime(reps["date"]).dt.normalize(),
-                   reps["_gkey"].astype(str)))
+                   reps["_gkey"].astype(str))) if len(reps) else set()
+    if consumed:
+        have |= set(consumed)
     want = zip(sel["activity_id"].astype(str),
                pd.to_datetime(sel["date"]).dt.normalize(),
                sel["_key"].astype(str))
@@ -309,13 +364,15 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
     if not len(sel):
         return {"ok": False, "reason": "No sets in that series."}
 
-    reps = _set_members(iv, sel)
+    reps, consumed = _set_members(iv, sel)
     # A set that owns no raw member row — a peak-meter reading, whose single
     # held window is not in the interval list, or a set whose rows were
     # pruned — would fall out of BOTH the bars and the session line, which is
     # how "FTP · 20 min" came to show one session of the four selected. Every
     # selected set is looked for, not only the ones the detector segmented.
-    solo = _uncovered_sets(sel, reps)
+    # `consumed` sets are the exception: their rows were swallowed by a drawn
+    # run of this same selection, so they are covered, not missing.
+    solo = _uncovered_sets(sel, reps, consumed)
     bars = _make_bars(reps, solo)
     if not len(bars):
         # Nothing could be bar drawn (cache pruned, and no single-effort

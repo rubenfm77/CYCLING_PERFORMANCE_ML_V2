@@ -216,8 +216,17 @@ def render(head, ctx):
 
     # ── Interval watts over time + power-duration law ─────────────────────
     # Full history (df_all), not the sidebar range: the sidebar defaults to
-    # six months and would delete every year compared here.
-    fitness_section(df_all)
+    # six months and would delete every year compared here. The interval
+    # cache is read, never synced, here: the Intervals page owns the sync,
+    # and without rows this section falls back to the summary text on its
+    # own instead of failing the page.
+    try:
+        from core.interval_data import read_intervals as _read_iv
+        _iv_fit = _read_iv((pd.Timestamp.now().normalize()
+                            - pd.Timedelta(days=370)).isoformat())
+    except Exception:                                    # noqa: BLE001
+        _iv_fit = None
+    fitness_section(df_all, _iv_fit)
 
     # ── FTP progression ────────────────────────────────────────────────────
     section("📈 FTP progression — month by month")

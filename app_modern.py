@@ -48,7 +48,8 @@ from core.metrics import headline                       # noqa: E402
 # point is not to know in advance what a page module might raise on import; any
 # of it must not be allowed to reach the user as a blank dashboard.
 _VIEW_NAMES = ("evolution", "fitness", "forecast", "interval_watts",
-               "intervals_view", "overview", "sessions", "training", "trends")
+               "intervals_view", "overview", "plan", "sessions", "training",
+               "trends")
 
 _views, _view_errors = {}, {}
 for _name in _VIEW_NAMES:
@@ -107,6 +108,8 @@ _SPECS = [
      partial(_render_of("evolution"), head, ctx), False),
     ("interval-watts", "\U0001F3AF", "Power law",
      partial(_render_of("interval_watts"), head, ctx), False),
+    ("plan", "📋", "Plan",
+     partial(_render_of("plan"), head, ctx), False),
 ]
 
 _pages, _by_slug = [], {}

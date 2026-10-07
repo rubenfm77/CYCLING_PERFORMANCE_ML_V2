@@ -82,20 +82,30 @@ import pandas as pd
 MIN_CELL_N = 3
 
 # Rep-length classes. `under 90s` is deliberately not subdivided: at that scale
-# the exact seconds are the only honest description, and the user rule says
-# sub-90-second efforts keep their seconds.
-# Half-open on the right: `lo <= secs < hi`. Stated plainly because it is the
-# kind of boundary a reader assumes the other way round: a WHOLE 20:00 (1200 s)
-# lands in "20-30 min", and 19:59 lands in "10-20 min". Nothing is lost by it —
-# every bar and every table row also carries its exact length (fmt_rep), so a
-# 20:00 effort is always visible as "20:00" and never only as a class name.
+# ── rep-length classes: the athlete's own tolerance rule ──────────────────────
+# A class holds the effort it was PLANNED as, not the second the meter stopped
+# on. The athlete rides 20-minute and 30-minute efforts; the detector and the
+# peak meter read them back as 20:03, 20:07, 21:00, 30:07 … and a boundary at
+# exactly 20:00 / 30:00 split one workout across two classes (17 Apr rode four
+# ~20-minute efforts that landed as one "10-20 min" plus three "20-30 min",
+# so each page showed a single interval where two were ridden).
+#
+# The rule, stated by the athlete: anything UNDER 22 minutes is a 10-20 min
+# effort, and the same +2 minutes of tolerance applies at 30 (under 32 min is
+# a 20-30 min effort). The short classes keep exact bounds — a 90-second
+# sprint, a 5-minute and a 9:50 effort are distinct protocols, and the 5:00 and
+# 90-second boundaries carry hundreds of efforts that must not be shuffled.
+# Half-open on the right: `lo <= secs < hi`, so exactly 22:00 (1320 s) opens
+# "20-30 min" and exactly 32:00 (1920 s) opens "30+ min". Nothing is lost by
+# it — every bar and every table row also carries its exact length (fmt_rep),
+# so a 20:07 effort is always visible as "20:07" and never only as a class.
 REP_CLASSES = [
     ("under 90s", 0, 90),
     ("90s-5min", 90, 300),
     ("5-10 min", 300, 600),
-    ("10-20 min", 600, 1200),
-    ("20-30 min", 1200, 1800),
-    ("30+ min", 1800, np.inf),
+    ("10-20 min", 600, 1320),
+    ("20-30 min", 1320, 1920),
+    ("30+ min", 1920, np.inf),
 ]
 REP_ORDER = [c[0] for c in REP_CLASSES]
 
@@ -224,23 +234,27 @@ def fmt_rep(secs) -> str:
 
 
 def fmt_axis_dur(secs) -> str:
-    """Duration-axis label: seconds under a minute, whole minutes above it.
+    """Duration-axis label: seconds under a minute, minutes above it.
 
     The athlete's rule, asked for directly and twice: a duration reads in
     SECONDS while it lasts less than a minute and in MINUTES from there up —
-    `4824 s` on a tick is what was rejected. Two things are kept while doing
-    that. The minutes are rounded halves-DOWN — the house rule `dur_bucket`
-    and `_dur_label` already use — so an axis tick never disagrees with the
-    class a session is filed under. Exactness is not traded away: the exact
-    measured length stays on the hover and in `duration`; only the tick is
-    rounded, and `axis_labels()` refuses to let two ticks round to the same
-    word.
+    `4824 s` on a tick is what was rejected. From ten minutes up the minutes
+    are the NEAREST 5 (half up) — the same nominal rule `dur_bucket` files
+    classes by — so a 20:07 effort ticks as "20 min" and a 24:47 as "25 min"
+    instead of every measured wobble getting its own tick. Below ten minutes
+    the minutes stay whole halves-DOWN, so a 30 s rep is never merged and a
+    5:10 never reads as anything but "5 min". Exactness is not traded away:
+    the exact measured length stays on the hover and in `duration`; only the
+    tick is rounded, and `axis_labels()` refuses to let two ticks round to the
+    same word.
     """
     if secs is None or (isinstance(secs, float) and np.isnan(secs)):
         return "—"
     secs = float(secs)
     if secs < 60:
         return f"{secs:.0f} s"
+    if secs >= 600:
+        return f"{int(np.floor(secs / 300.0 + 0.5) * 5):d} min"
     return f"{int(np.ceil(secs / 60.0 - 0.5)):d} min"
 
 
@@ -829,6 +843,18 @@ def _iv_runs(rows: pd.DataFrame) -> list:
             w = np.nan
         if not np.isfinite(w):
             w = 0.0
+        # The row's own sequence number, when the frame carries one: it lets
+        # callers tell a fragment the run CONTAINS from a second effort that
+        # merely reads the same length. A bare frame without sequence numbers
+        # still joins — the seqs just stay empty.
+        try:
+            _sq = getattr(r, "oseq", getattr(r, "seq",
+                                             getattr(r, "_seq", np.nan)))
+            seq = float(_sq)
+        except (TypeError, ValueError):
+            seq = np.nan
+        if not np.isfinite(seq):
+            seq = np.nan
         is_work = str(getattr(r, "iv_type", "")).strip().upper() == "WORK"
         if is_work:
             if cur is not None and dip_s > 0:
@@ -841,17 +867,20 @@ def _iv_runs(rows: pd.DataFrame) -> list:
                     cur = None
             dip_s = dip_e = 0.0
             if cur is None:
-                cur = {"secs": 0.0, "energy": 0.0, "parts": [], "n_dips": 0}
+                cur = {"secs": 0.0, "energy": 0.0, "parts": [],
+                       "seqs": [], "n_dips": 0}
             cur["secs"] += secs
             cur["energy"] += secs * w
             cur["parts"].append(secs)
+            if np.isfinite(seq):
+                cur["seqs"].append(seq)
         elif cur is not None:
             dip_s += secs
             dip_e += secs * w
     if cur is not None:
         runs.append(cur)      # a ride's tail never shortens its last effort
     return [{"secs": r["secs"], "w": r["energy"] / r["secs"],
-             "parts": r["parts"], "n_dips": r["n_dips"]}
+             "parts": r["parts"], "seqs": r["seqs"], "n_dips": r["n_dips"]}
             for r in runs if r["secs"] > 0]
 
 
@@ -865,7 +894,7 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
     ever rebuilt without a peak window vouching for it.
     """
     cols = ["activity_id", "date", "day", "secs", "w", "cls", "parts",
-            "pieces", "n_dips", "peak_w", "peak_s"]
+            "pieces", "seqs", "n_dips", "peak_w", "peak_s"]
     empty = pd.DataFrame(columns=cols)
     if iv is None or not len(iv) or df_all is None or not len(df_all):
         return empty
@@ -890,7 +919,9 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
         "iv_type": iv["iv_type"].astype(str),
         "secs": pd.to_numeric(iv["secs"], errors="coerce"),
         "avg_w": pd.to_numeric(iv["avg_w"], errors="coerce"),
-        "_seq": (pd.to_numeric(iv["seq"], errors="coerce")
+        # NOT "_seq": pandas itertuples() renames underscore-led columns
+        # ("_seq" arrives as "_4"), so the sequence number travels bare.
+        "oseq": (pd.to_numeric(iv["seq"], errors="coerce")
                  if "seq" in iv.columns else np.arange(len(iv))),
     })
 
@@ -899,12 +930,19 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
         g = frame[frame["_aid"] == str(p.activity_id)]
         if not len(g):
             continue
-        g = g.sort_values("_seq", kind="stable")
-        window = rep_class(float(p.pk_s))
+        g = g.sort_values("oseq", kind="stable")
+        window = float(p.pk_s)
         work = g.loc[g["iv_type"].str.upper() == "WORK", "secs"].dropna()
-        # The anchor: where the detector already reports an effort of the
-        # window's class, it told this story whole and nothing is rebuilt.
-        if len(work) and any(rep_class(x) == window for x in work):
+        # The anchor: where the detector already reports an effort of about
+        # the window's LENGTH (±2 minutes), it told this story whole and
+        # nothing is rebuilt. A mere class match is NOT enough: a 683-second
+        # fragment shares the 21:00 window's class without being the effort,
+        # and anchoring on it both blocked the rebuild and let the meter row
+        # draw on top of its own fragment (04 Jul 2026 drew 683 s + 1260 s
+        # for one 20-minute effort). Same ±2 minutes the peak fill uses, so
+        # the two guards can never disagree about one session.
+        if len(work) and bool((np.abs(work.values - window)
+                               <= REBUILD_NEAR_S).any()):
             continue
         for run in _iv_runs(g):
             s, w, pk_s, pk_w = run["secs"], run["w"], float(p.pk_s), float(p.pk_w)
@@ -926,6 +964,7 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
                 "cls": rep_class(s),
                 "parts": len(run["parts"]),
                 "pieces": " + ".join(fmt_rep(x) for x in run["parts"]),
+                "seqs": tuple(float(x) for x in run["seqs"]),
                 "n_dips": int(run["n_dips"]),
                 "peak_w": float(pk_w),
                 "peak_s": int(round(pk_s)),

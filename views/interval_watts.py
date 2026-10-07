@@ -187,15 +187,22 @@ def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
     return fig_t
 
 
-def fitness_section(df_all: pd.DataFrame) -> None:
+def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
     """The interval-watts charts on the Fitness page.
 
     Two of them, both asked for by name: the DATE x-axis "Measured interval
     watts over time" chart, and the power-duration law. Same data (full history
     from df_all, not the sidebar range), same rules as the Interval watts page:
-    one training type at a time, one line per rep length class, isolated
-    pushes already discarded by ml.interval_watts.measured(), and the law
+    one training type at a time, one line per rep length class, and the law
     fitted on every effort of the type in every year.
+
+    The time chart reads the SAME rows Evolution charts — the peak-power
+    meter's held windows with whole efforts rebuilt from the detector's
+    fragments where the detector cut them (`iv`, the interval cache) — so a
+    class shows the same days on both pages instead of the Fitness line going
+    quiet where Evolution draws bars (FTP × 20-30 min had 3 points here
+    against 7+ days there, and no 30+ line at all). Without the cache it falls
+    back to the per-activity summary text, and says so.
 
     No FTP / VO2MAX effort filter: it said nothing the training type does not
     already say, and the class under every line already separates the two
@@ -230,36 +237,60 @@ def fitness_section(df_all: pd.DataFrame) -> None:
                  "is always fitted on every year.")
 
     M_all = M
-    cells = iw.measured_cells(M, yr)
-    mine = cells[cells["tt"] == tt].sort_values("med_w", ascending=False)
-
-    section("\U0001F4C8 Measured interval watts over time")
-    if not len(mine):
-        callout("Nothing for this type", f"**{tt}** has no detected "
-                f"effort in {yr}.", C["orange"], "\U0001F6A7")
-        _law_section(M_all, tt, 0, None)
-        return
-
-    st.caption(
-        f"**Detected efforts of {tt}, {yr}: one point per day, x-axis is the "
-        "date.** One series per rep length class; two classes never share a "
-        "number. The dotted line is the average of the charted points."
-    )
     M_yr = M[M["year"] == yr] if yr is not None else M
     M_tt = M_yr[M_yr["tt"] == tt]
-    if not len(M_tt):
+
+    section("\U0001F4C8 Measured interval watts over time")
+    # The Evolution source first: meter windows + rebuilt efforts, one row
+    # per effort. The summary-text fallback below only serves sessions the
+    # meter never reported a window for.
+    _eff = None
+    if iv is not None and len(iv):
+        try:
+            _eff = iw.effort_best(df_all, iv)
+        except Exception:                            # noqa: BLE001
+            _eff = None
+    daily, src_note = pd.DataFrame(), ""
+    if _eff is not None and len(_eff):
+        _e = _eff[(_eff["tt"] == tt)
+                  & (pd.to_numeric(_eff["year"],
+                                   errors="coerce") == yr)]
+        if len(_e):
+            daily = (_e.groupby(["cls", "day"], as_index=False)
+                     .agg(med_w=("w", "median"), n=("w", "size"),
+                          rep_secs=("secs", "median"))
+                     .rename(columns={"day": "date"})
+                     .sort_values("date").reset_index(drop=True))
+            src_note = ("the peak-power meter's held windows, with whole "
+                        "efforts rebuilt from the detector's fragments where "
+                        "it cut them — the same rows Evolution charts, so a "
+                        "class shows the same days on both pages")
+    if not len(daily):
+        if len(M_tt):
+            daily = (M_tt.groupby(["cls", "date"], as_index=False)
+                     .agg(med_w=("w", "median"), n=("w", "size"),
+                          rep_secs=("secs", "median")))
+            daily = daily.sort_values("date")
+            src_note = ("the per-activity summary text (no meter window and "
+                        "no interval rows for these sessions, so the rebuilt "
+                        "efforts cannot be drawn here)")
+    if not len(daily):
         callout("Nothing for this type", f"**{tt}** has no detected "
                 f"effort in {yr}.", C["orange"], "\U0001F6A7")
         _law_section(M_all, tt, 0, None)
         return
 
-    daily = (M_tt.groupby(["cls", "date"], as_index=False)
-             .agg(med_w=("w", "median"), n=("w", "size"),
-                  rep_secs=("secs", "median")))
-    daily = daily.sort_values("date")
-    show(_time_figure(daily, tt, yr))
     st.caption(
-        f"{len(daily):,} day(s), {int(daily['n'].sum()):,} detected effort(s). "
+        f"**Charted efforts of {tt}, {yr}: one point per day, x-axis is the "
+        "date.** One series per rep length class; two classes never share a "
+        "number. The dotted line is the average of the charted points. "
+        f"Source: {src_note}."
+    )
+    show(_time_figure(daily, tt, yr))
+    _n_dates = int(pd.to_datetime(daily["date"]).dt.normalize().nunique())
+    st.caption(
+        f"{_n_dates:,} date(s), {int(daily['n'].sum()):,} effort(s) in "
+        f"{len(daily):,} day-class points. "
         "Every point carries its n in the hover; the class under each line is "
         "printed in the legend, so a 15-minute line is never read as a "
         "3-minute one."

@@ -126,8 +126,9 @@ print("=" * 72)
 for secs, want in [(1, "under 90s"), (30, "under 90s"), (89, "under 90s"),
                    (90, "90s-5min"), (299, "90s-5min"), (300, "5-10 min"),
                    (599, "5-10 min"), (600, "10-20 min"), (1199, "10-20 min"),
-                   (1200, "20-30 min"), (1799, "20-30 min"),
-                   (1800, "30+ min"), (5400, "30+ min")]:
+                   (1200, "10-20 min"), (1319, "10-20 min"),
+                   (1320, "20-30 min"), (1919, "20-30 min"),
+                   (1920, "30+ min"), (5400, "30+ min")]:
     check(f"{secs:>5}s -> {want}", rep_class(secs) == want, rep_class(secs))
 
 check("classes cover the whole range with no gap and no overlap",
@@ -323,7 +324,7 @@ DAY_DF = pd.DataFrame({
     "interval_summary": [""] * 7,
     "WorkoutDescription": [""] * 7,
     BEST_W_COL: [214, 240, 231, 200, 190, 205, 300],
-    BEST_S_COL: [1200, 1200, 1200, 1200, 1800, 600, 900],
+    BEST_S_COL: [1400, 1400, 1400, 1400, 2000, 600, 900],
 })
 
 B = effort_best(DAY_DF)
@@ -361,8 +362,9 @@ check("the interval watts are never replaced by the session average",
 
 O = day_options(DAY_DF)
 got = set(map(tuple, O[["tt", "cls"]].values.tolist()))
-# 1800 s is a whole 30:00 and therefore "30+ min"; 600 s is a whole 10:00 and
-# therefore "10-20 min". Both are the half-open boundary behaving as documented.
+# 2000 s is 33:20 and therefore "30+ min" (the class opens at 32:00, so a
+# whole 30:00 reads "20-30 min"); 600 s is a whole 10:00 and therefore
+# "10-20 min". Both are the half-open boundary behaving as documented.
 check("day_options offers only pairs that exist",
       got == {("FTP", "20-30 min"), ("END", "30+ min"), ("END", "10-20 min")},
       f"{sorted(got)}")
@@ -384,16 +386,20 @@ check("the picker's median is the median of the bars drawn, not of the "
       f"{float(fr['med_w'])} vs {float(S['w'].median())}")
 check("day_options reports the median length it measured",
       fmt_rep(int(O[(O["tt"] == "END") & (O["cls"] == "30+ min")]
-                  ["med_secs"].iloc[0])) == "30:00")
+                  ["med_secs"].iloc[0])) == "33:20")
 
 print()
 print("=" * 72)
 print("8. the boundary, stated rather than assumed")
 print("=" * 72)
-check("a WHOLE 20:00 sits in the class that names 20",
-      rep_class(1200) == "20-30 min", rep_class(1200))
-check("19:59 is not in it",
-      rep_class(1199) == "10-20 min", rep_class(1199))
+check("a WHOLE 20:00 sits in 10-20 min — anything under 22:00 does",
+      rep_class(1200) == "10-20 min", rep_class(1200))
+check("21:59 is still in it, 22:00 opens the next class",
+      rep_class(1319) == "10-20 min" and rep_class(1320) == "20-30 min",
+      f"{rep_class(1319)} / {rep_class(1320)}")
+check("the same tolerance at 30: 31:59 is 20-30 min, 32:00 opens 30+",
+      rep_class(1919) == "20-30 min" and rep_class(1920) == "30+ min",
+      f"{rep_class(1919)} / {rep_class(1920)}")
 check("the exact length is always printable, so a 20:00 never shows as a "
       "class name alone",
       fmt_rep(1200) == "20:00" and fmt_rep(1199) == "19:59",
