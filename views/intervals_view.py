@@ -23,6 +23,7 @@ from ml.composition_intervals import run_composition
 from ml.exertion_forecast import metric_counts, run_exertion_forecast
 from ml.interval_forecast import run_band_forecast
 from ml.protocol_reps import run_protocol_view
+from ml.interval_watts import series_name
 from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, REBUILD_SRC,
                               add_signatures,
                               build_sets, fill_peak_efforts,
@@ -987,7 +988,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         fig = _rep_bar_figure(pv)
         style_figure(
             fig,
-            f"{fam_name} · {cls} — individual intervals, "
+            f"{series_name(fam, cls)} — individual intervals, "
             f"session by session", H_STD)
         # after style_figure: it owns the margins the legend lane sits in
         _lane_legend(fig, ["Individual interval (avg W)", "Session average"],

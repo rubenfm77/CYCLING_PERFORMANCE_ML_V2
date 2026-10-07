@@ -36,7 +36,7 @@ WARMUP = [("15m", "ramp 50%-75%", "90rpm")]
 COOLDOWN = [("10m", "ramp 60%-40%", "80rpm")]
 
 
-def _target_for(family: str, nominal_min: float) -> str:
+def target_for(family: str, nominal_min: float) -> str:
     bands = TARGETS.get(family, TARGETS["Z2"])
     for lo, t in bands:
         if nominal_min >= lo:
@@ -274,7 +274,7 @@ def build_plan(mix: pd.DataFrame, refs: dict, weekdays: list,
             rest_min = (rest / 60.0 if np.isfinite(rest) and rest > 0
                         else (nom if nom <= 1.0 else
                               (5.0 if nom < 10 else float(rest_fallback))))
-            target = _target_for(fam, nom)
+            target = target_for(fam, nom)
             day = seen[i % len(seen)]
             date = (pd.Timestamp(start)
                     + pd.Timedelta(days=(wk - 1) * 7

@@ -109,6 +109,29 @@ REP_CLASSES = [
 ]
 REP_ORDER = [c[0] for c in REP_CLASSES]
 
+# Short class names for series display: "FTP (10-20)", "VO2MAX (<8 min)" is
+# NOT one of these — the under-8-minute multi-rep band is a FAMILY rule
+# (rule A files it as VO2MAX), while these name the rep-length class inside
+# any family. Grouping always uses REP_CLASSES above; these strings never
+# classify anything.
+CLS_SHORT = {
+    "under 90s": "<90s",
+    "90s-5min": "90s-5",
+    "5-10 min": "5-10",
+    "10-20 min": "10-20",
+    "20-30 min": "20-30",
+    "30+ min": ">30",
+}
+
+
+def series_name(family, cls) -> str:
+    """Display name of one comparable series: family + length bin.
+
+    "FTP (10-20)" is the 10-to-22-minute threshold work (the tolerance rule),
+    "FTP (20-30)" the 22-to-32-minute work, "FTP (>30)" everything longer.
+    """
+    return f"{family} ({CLS_SHORT.get(cls, cls)})"
+
 # `'` is MINUTES and `"` is SECONDS in these comments. They are separate
 # alternatives and are never merged into one unit group: reading 10" as ten
 # minutes instead of ten seconds inflates a sprint session by 60x, and it is a

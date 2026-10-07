@@ -296,6 +296,19 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
          (st if st else ("single efforts" if n <= 1 else "unclassified sets")))
         for t, st, n in zip(dbt, style, reps)
     ]
+    # Rule A (athlete's rule): an effort under 8 minutes with MORE THAN ONE
+    # rep in the session is VO2MAX work. It applies where the athlete left no
+    # label — a label always wins — and retires the ambiguous heuristic
+    # buckets ("FTP / threshold sets", "VO₂ max sets", "unclassified sets")
+    # for 15 s–8 min multi-rep work. Two protocol patterns keep their names:
+    # sprints (under 15 s, alactic, not VO2) and the 30 s Billat/micro-rep
+    # patterns (a first-class discipline in this file, not generic VO2).
+    _rs = pd.to_numeric(s["rep_secs"], errors="coerce")
+    _blank = dbt.astype(str).str.strip().isin(BLANK_TYPE_TOKENS)
+    _proto = s["family"].isin(["BILLAT", "Billat-style (30 s on / 30 s off)",
+                               "micro-reps", "sprints"])
+    _rule_a = (_blank & (reps > 1) & _rs.ge(15.0) & _rs.lt(480.0) & ~_proto)
+    s.loc[_rule_a, "family"] = "VO2MAX"
     s["dur_b"] = [dur_bucket(x) for x in
                   pd.to_numeric(s["rep_secs"], errors="coerce")]
     s["dur_label"] = [dur_class_label(b) for b in s["dur_b"]]

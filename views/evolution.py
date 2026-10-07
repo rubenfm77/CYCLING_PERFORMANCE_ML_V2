@@ -163,7 +163,7 @@ def _day_figure(S: pd.DataFrame, tt: str, cls: str) -> go.Figure:
 
     style_figure(
         fig,
-        f"{tt} — interval watts by day, {cls} class"
+        f"{iw.series_name(tt, cls)} — interval watts by day"
         "<br><sup>one equal-width slot per charted bar, in date order; a day "
         "that rode two efforts of this class draws two bars, indexed under "
         "the same date. The label above each bar is that interval's watts and "
@@ -200,20 +200,24 @@ def _interval_by_day(ctx):
 
     TWO sources, both long-effort readings, and neither is the auto-detected
     `interval_summary` (measured on this file, that reports what is UNUSUAL
-    inside a ride — on a real interval session it fills with 10-second
-    accelerations and 1-5 minute rolling sections, and exactly one detected
-    effort in the whole file sits between 19 and 21 minutes):
+    inside a ride — on a real interval session it fills with accelerations
+    and rolling sections, not with the held 20-minute efforts):
 
       * the peak-meter reading (`icu_pm_ftp_watts` with its own
         `icu_pm_ftp_secs`), which has a reading on every FTP session of 2026
         and reports the length it was sustained over — one window per ride;
       * the detector's own fragments, put back together where that meter
         window vouches for the effort (`ml.interval_watts.rebuilt_efforts`).
-        This is what puts the SECOND 20-minute interval of 30 Sep 2026 on the
-        chart: the segmenter cut the two efforts into 158/285/384/180 s and
-        882/324 s pieces, and one meter window cannot show two rides of the
-        same length. Every bar's hover and the table's Source column say
-        which of the two reported it.
+        This is what puts the two intervals of 15 Sep 2026 on the chart (both
+        rebuilt, 20:01 + 20:06) and both halves of 30 Sep (19:17 + 20:07):
+        the segmenter cuts long efforts into pieces, and one meter window
+        cannot show two efforts of the same length. A rebuilt run is filed
+        in the class of its OWN length — under 22:00 is "10-20 min" — so a
+        pair ridden as 2×20 never splits across two classes. Consumed
+        fragments are not drawn again next to the run containing them, and
+        where the same ride sits in the cache twice the coherent copy wins.
+        Every bar's hover and the table's Source column say which source
+        reported it.
 
     Because the length varies from 5 to 55 minutes across sessions, one type is
     NOT enough on its own: a 258 W effort over 8:00 and a 188 W effort over
@@ -276,7 +280,7 @@ def _interval_by_day(ctx):
                                "is higher where one day held more than one.")
     c_opts, csub = _cls_list(tt)
     with c2:
-        c_lab = {r.cls: f"{r.cls} — {int(r.days):,} day(s), "
+        c_lab = {r.cls: f"{iw.series_name(tt, r.cls)} — {int(r.days):,} day(s), "
                         f"{int(r.bars):,} bar(s), "
                         f"median {iw.fmt_watts(r.med_w)} W over "
                         f"{iw.fmt_rep(r.med_secs)}"
