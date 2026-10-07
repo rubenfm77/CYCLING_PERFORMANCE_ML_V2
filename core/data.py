@@ -27,6 +27,50 @@ from core.theme import (
 FTP_AUTO_MIN_S = 18 * 60     # 18 min
 FTP_AUTO_MAX_S = 25 * 60     # 25 min
 FTP_AUTO_FRAC = 0.95         # >= 95 % of that session's own eFTP
+FTP_AUTO_SHARE = 0.15        # the window must be >= 15 % of the ride itself
+#
+# The share test is what separates a threshold SESSION from a threshold PUSH.
+# An unlabelled 3 h ride can contain one 21-min surge at 106 % of eFTP without
+# being an FTP session: 4 Oct 2026 held 21 of 189 min (11 %) and is not one,
+# while 30 Sep 2026 held 22 of 114 min (19 %) and is. A window that short a
+# slice of the ride says nothing about what the ride was FOR, so no type is
+# invented for it.
+
+
+def auto_ftp_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows the transparent FTP auto-label rule catches — the whole rule.
+
+    Four conditions must hold together, and the last one is the one that keeps
+    the rule honest about INTENT rather than only about power:
+
+      1. the session carries no workout label (an athlete's own label always
+         wins and is never touched here);
+      2. its peak-meter window is 18–25 min long;
+      3. the watts held over that window are >= 95 % of the eFTP recorded on
+         that same ride (not today's — the value rolls);
+      4. the window spans >= 15 % of the ride, so the ride was built around
+         the effort instead of merely containing it.
+
+    Everything a condition cannot decide is False: a missing duration, window
+    or eFTP means no label is invented. Called by `load_data` before
+    `training_type` is written to, so it always reads the source's own label.
+    """
+    _tt = (df["training_type"] if "training_type" in df.columns
+           else pd.Series(np.nan, index=df.index, dtype="object"))
+    _has_label = _tt.notna() & ~_tt.astype(str).str.strip().isin(
+        BLANK_TYPE_TOKENS)
+
+    def _n(col):
+        if col not in df.columns:
+            return pd.Series(np.nan, index=df.index, dtype="float64")
+        return pd.to_numeric(df[col], errors="coerce")
+
+    _pm_w, _pm_s = _n("icu_pm_ftp_watts"), _n("icu_pm_ftp_secs")
+    _ftp, _dur = _n("eftp"), _n("duration_s")
+    return ((~_has_label)
+            & _pm_s.between(FTP_AUTO_MIN_S, FTP_AUTO_MAX_S)
+            & (_pm_w >= FTP_AUTO_FRAC * _ftp)
+            & (_pm_s >= FTP_AUTO_SHARE * _dur))
 
 # ── Duplicate-ride tolerances ────────────────────────────────────────────────
 # Two rows are the SAME physical ride when they fall on the same calendar day, their
@@ -393,7 +437,11 @@ def load_data() -> pd.DataFrame:
     # can be audited:
     #     the session contains an 18–25 min peak-meter effort at >= 95 % of that
     #     session's OWN eFTP (not today's eFTP — the value is a rolling one and
-    #     using the current number on an old ride would be anachronistic).
+    #     using the current number on an old ride would be anachronistic) AND that
+    #     window is >= 15 % of the ride itself. The first three conditions say the
+    #     effort was threshold work; the last one says the RIDE was built around it.
+    #     A 3-hour endurance ride with one 21-min surge inside it fails the share
+    #     test and stays unlabelled instead of being typed FTP.
     #
     # Nothing is overwritten silently: `training_type_raw` keeps exactly what the
     # source said and `label_source` records how each row was decided.
@@ -410,9 +458,7 @@ def load_data() -> pd.DataFrame:
         return pd.to_numeric(df[col], errors="coerce")
 
     _pm_w, _pm_s, _ftp = _n("icu_pm_ftp_watts"), _n("icu_pm_ftp_secs"), _n("eftp")
-    _auto_ftp = ((~_has_label)
-                 & _pm_s.between(FTP_AUTO_MIN_S, FTP_AUTO_MAX_S)
-                 & (_pm_w >= FTP_AUTO_FRAC * _ftp))
+    _auto_ftp = auto_ftp_mask(df)
     df.loc[_auto_ftp, "training_type"] = "FTP"
     df.loc[_auto_ftp, "label_source"] = "auto-ftp"
     df["auto_ftp_effort_w"] = np.where(_auto_ftp, _pm_w, np.nan)

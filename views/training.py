@@ -8,7 +8,8 @@ import streamlit as st
 
 from core.components import (callout, legend, metric_card, page_header, section, show,
                              stat_block)
-from core.data import FTP_AUTO_FRAC, FTP_AUTO_MAX_S, FTP_AUTO_MIN_S
+from core.data import (FTP_AUTO_FRAC, FTP_AUTO_MAX_S, FTP_AUTO_MIN_S,
+                       FTP_AUTO_SHARE)
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, FTP_DRIVERS, H_CARD, H_PAIR, H_STD,
                         IF_THRESHOLD, IF_VO2, IF_Z2_MAX, MAIN_TYPES, SURGERY, TYPE_COLORS,
                         ZONES, style_figure)
@@ -405,7 +406,12 @@ def render(head, ctx):
                 f"**Rule.** A session with *no* workout name is labelled **FTP** when "
                 f"it contains a peak-meter effort of "
                 f"**{FTP_AUTO_MIN_S // 60}–{FTP_AUTO_MAX_S // 60} min** at "
-                f"**≥ {FTP_AUTO_FRAC:.0%} of that session's own eFTP**.\n\n"
+                f"**≥ {FTP_AUTO_FRAC:.0%} of that session's own eFTP** *and* that "
+                f"window spans **≥ {FTP_AUTO_SHARE:.0%} of the ride itself**.\n\n"
+                f"The first three conditions say the effort was threshold work. The "
+                f"share test says the RIDE was built around it — it is what keeps a "
+                f"3-hour endurance ride with one 21-min surge inside from being typed "
+                f"FTP. Every matched session below prints both of its numbers.\n\n"
                 f"Each session is compared against the eFTP recorded *on that ride*, "
                 f"not today's — eFTP is a rolling value, so using the current one on "
                 f"an old session would be anachronistic.\n\n"
@@ -420,17 +426,29 @@ def render(head, ctx):
                 _a["min"] = _a["effort"].map(lambda m: f"{m:.0f} min")
                 _a["effort"] = _a["auto_ftp_effort_w"].round(0)
                 _a["pct"] = (_a["auto_ftp_effort_w"] / _a["auto_ftp_threshold_w"]).round(3)
-                _a = _a[["date", "effort", "min", "pct"]].sort_values("date", ascending=False)
+                if "duration_s" in _a.columns:
+                    _d = pd.to_numeric(_a["duration_s"], errors="coerce")
+                    _a["share"] = (_a["auto_ftp_effort_s"] / _d).round(3)
+                else:
+                    _a["share"] = np.nan
+                _a = _a[["date", "effort", "min", "pct", "share"]].sort_values(
+                    "date", ascending=False)
                 _a["date"] = _a["date"].dt.strftime("%Y-%m-%d")
                 _a["pct"] = _a["pct"].map(lambda p: f"{p:.1%}")
-                _a.columns = ["Date", "Effort (W)", "Window", "% of eFTP"]
+                _a["share"] = _a["share"].map(
+                    lambda s: f"{s:.0%}" if pd.notna(s) else "—")
+                _a.columns = ["Date", "Effort (W)", "Window", "% of eFTP",
+                              "Share of ride"]
                 st.dataframe(_a, width="stretch", hide_index=True,
                              column_config={
                                  "Effort (W)": st.column_config.NumberColumn(format="%.0f"),
                                  "% of eFTP": st.column_config.TextColumn(),
+                                 "Share of ride": st.column_config.TextColumn(),
                              })
                 st.caption(f"{_n_auto} session(s) matched. A % of eFTP near 100 % is "
-                           f"threshold work; far above it means a hard outlier effort.")
+                           f"threshold work; far above it means a hard outlier effort. "
+                           f"Share of ride is the window over the whole session, and "
+                           f"must clear {FTP_AUTO_SHARE:.0%} for the label to apply.")
             else:
                 callout("No sessions matched", "The rule caught nothing in this dataset.",
                         C["muted"], icon="ℹ️")

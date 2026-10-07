@@ -17,6 +17,13 @@ Two rules are pinned here, and they are the same rule seen from two directions.
 The point of both is the same: a categorisation the athlete did not make must
 not sit beside theirs in a chart, and a name they wrote must not fork into two.
 
+3. `core.data.auto_ftp_mask` types an unlabelled session FTP only when its
+   18–25 min peak window is >= 95 % of that ride's own eFTP **and** >= 15 % of
+   the ride itself. The share test is what stopped 4 Oct 2026 — a 3 h 09 ride
+   at IF 0.77 whose best 21 min happened to hit 106 % of eFTP — from being
+   charted as an FTP session, while 30 Sep 2026 (2 × 20 min inside a 1 h 54
+   ride, 19 %) keeps the label. No invention in either direction.
+
 Run:  python tests/test_label_authority.py     (exit 0 = pass, 1 = fail)
 """
 import os
@@ -63,7 +70,8 @@ sys.path.insert(0, ROOT)
 
 import pandas as pd  # noqa: E402
 
-from core.data import _apply_type_aliases                 # noqa: E402
+from core.data import (FTP_AUTO_SHARE, _apply_type_aliases,
+                       auto_ftp_mask)                        # noqa: E402
 from core.theme import BLANK_TYPE_TOKENS, MAIN_TYPES, TYPE_ALIASES  # noqa: E402
 from ml.set_evolution import _style                       # noqa: E402
 from ml.type_comparison import FAMILY_ORDER, FAMILY_SHORT  # noqa: E402
@@ -181,6 +189,72 @@ check("a session written RONNESTAD is indistinguishable from one written "
 check("and its 30 s set is the same family either way",
       _style(29, 29, 16, C.at[0, "training_type"]) ==
       _style(29, 29, 16, C.at[1, "training_type"]) == "BILLAT")
+
+print()
+# ── 4. the auto-label only calls it FTP when the ride was built around it ────
+print()
+print("=" * 72)
+print("4. the FTP auto-label needs the window to define the ride")
+print("=" * 72)
+print(f"  18–25 min · ≥ 95 % of the ride's eFTP · SHARE={FTP_AUTO_SHARE:.0%} "
+      f"of the ride")
+
+# Shapes taken from the two sessions the rule has ever caught on the live file.
+# eFTP is back-solved from the % the audit table prints (106.2 % / 109.3 %).
+AUTO = pd.DataFrame([
+    # label,              W,   window,   eFTP,  ride secs   →  expected
+    dict(training_type=None,           icu_pm_ftp_watts=236.0,
+     icu_pm_ftp_secs=1260.0, eftp=222.2, duration_s=11340.0),   # 4 Oct: 11 %
+    dict(training_type=None,           icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1320.0, eftp=223.2, duration_s=6840.0),    # 30 Sep: 19 %
+    dict(training_type="AEROBIC BASE", icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1320.0, eftp=223.2, duration_s=6840.0),    # label wins
+    dict(training_type=None,           icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=900.0, eftp=223.2, duration_s=6840.0),     # 15 min window
+    dict(training_type=None,           icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1320.0, eftp=223.2, duration_s=float("nan")),  # no ride
+    dict(training_type=None,           icu_pm_ftp_watts=210.0,
+     icu_pm_ftp_secs=1320.0, eftp=223.2, duration_s=6840.0),    # 94 % of eFTP
+    dict(training_type=None,           icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1080.0, eftp=223.2, duration_s=7200.0),    # exactly 15 %
+    dict(training_type=None,           icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1560.0, eftp=223.2, duration_s=6840.0),    # 26 min window
+    dict(training_type="—",            icu_pm_ftp_watts=244.0,
+     icu_pm_ftp_secs=1320.0, eftp=223.2, duration_s=6840.0),    # blank token
+])
+_m = auto_ftp_mask(AUTO)
+print(f"  matched {int(_m.sum())} of {len(AUTO)} synthetic sessions")
+
+check("4 Oct 2026 — 21 of 189 min inside a 3 h ride — is NOT typed FTP",
+      not _m.iloc[0],
+      f"window {AUTO.icu_pm_ftp_secs.iloc[0]:.0f}s of "
+      f"{AUTO.duration_s.iloc[0]:.0f}s")
+check("30 Sep 2026 — 22 of 114 min, the ride he showed up for — IS typed FTP",
+      bool(_m.iloc[1]))
+check("an athlete's own label is never touched by the rule",
+      not _m.iloc[2])
+check("a 15-min window is outside the threshold-effort definition",
+      not _m.iloc[3])
+check("a missing ride duration invents nothing (no share, no label)",
+      not _m.iloc[4])
+check("watts below 95 % of that ride's eFTP do not match",
+      not _m.iloc[5])
+check("exactly 15 % of the ride still counts",
+      bool(_m.iloc[6]),
+      f"{AUTO.icu_pm_ftp_secs.iloc[6]:.0f}/{AUTO.duration_s.iloc[6]:.0f}")
+check("a 26-min window is outside the definition too",
+      not _m.iloc[7])
+check("a blank type token still means unlabelled, so the rule may apply",
+      bool(_m.iloc[8]))
+check("the share threshold is the one the pages print",
+      FTP_AUTO_SHARE == 0.15, str(FTP_AUTO_SHARE))
+check("the mask never returns rows the frame does not have",
+      len(_m) == len(AUTO) and _m.dtype == bool)
+check("a frame with none of the columns is safe and matches nothing",
+      not bool(auto_ftp_mask(pd.DataFrame({"date": ["2026-10-04"]})).any()))
+check("an empty frame is safe",
+      len(auto_ftp_mask(pd.DataFrame({"training_type": [],
+                                      "icu_pm_ftp_secs": []}))) == 0)
 
 print()
 print("=" * 72)
