@@ -221,9 +221,10 @@ def _interval_by_day(ctx):
 
     Because the length varies from 5 to 55 minutes across sessions, one type is
     NOT enough on its own: a 258 W effort over 8:00 and a 188 W effort over
-    26:00 are not the same thing. So a length class is required too, and both
-    the watts and the exact length are written on every bar, because the bar
-    geometry alone cannot carry a 211 -> 244 W difference the eye can trust.
+    26:00 are not the same thing. So a length class is required too, and the
+    watts plus the nominal length are written on every bar (exact in the
+    hover and table), because the bar geometry alone cannot carry a
+    211 -> 244 W difference the eye can trust.
     """
     df = ctx.df_all
     # The interval cache, read but never synced: this page does no network
@@ -327,8 +328,9 @@ def _interval_by_day(ctx):
     st.caption(
         f"{len(S):,} bar(s) across {n_days:,} day(s) of "
         f"**{n_rides:,}** session(s). "
-        f"Each bar is one sustained interval of the {cls} class — its watts, "
-        "printed over the bar, with the exact length it was held under them. "
+        f"Each bar is one sustained interval of the {cls} class — its watts "
+        "and nominal length printed over the bar (exact length in the hover "
+        "and the table below). "
         + (f"{n_reb} of them are efforts rebuilt from the detector's "
            f"fragments — the pieces the segmenter cut, joined across breaks "
            f"under 1:30, which is how the second interval of a two-interval "
