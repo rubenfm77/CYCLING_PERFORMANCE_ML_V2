@@ -5,10 +5,12 @@ Two notes on what this file is allowed to assume.
 
 The multi-rep example is BILLAT rather than "Ronnestad 30/15". Both are 30 s
 reps, but a 30 s set from a session the athlete filed under BILLAT is now a
-BILLAT set — see `ml/set_evolution._style` — so the five labelled sessions moved
-and "Ronnestad 30/15" is down to the one unlabelled session. A hardcoded example
-that the data has legitimately moved under is a test that will break for the
-wrong reason, and it is checked against the summary below rather than assumed.
+BILLAT set — see `ml/set_evolution._style` — and no code path produces the
+old "Ronnestad-style" string at all anymore, so that family cannot exist and
+no test may assume it does. The thin-series case below is synthetic (one set,
+one session) plus a live sweep over every 1-session series the summary holds:
+a hardcoded example that the data has legitimately moved under is a test that
+will break for the wrong reason, and this one refuses to.
 
 `agree()` treats two blanks as agreeing. It has to: a one-session series
 correctly has no trend and no CI, and `abs(nan - nan) < 0.02` is False, so the
@@ -92,22 +94,54 @@ for want in (("single efforts", "3 min"), ("BILLAT", "30 s"),
         assert not np.isnan(r0["W/month"]), "BILLAT should carry a trend"
         assert not np.isnan(r0["± 95%"]), "BILLAT should carry a CI"
 
-# A series too thin to support a trend must not grow one. "Ronnestad 30/15" is
-# the case: the athlete's five labelled 30 s sets are BILLAT now, so this family
-# holds the single unlabelled session left, and one point is not a trend.
+# A series too thin to support a trend must not grow one. This used to be
+# pinned on the "Ronnestad 30/15" family, but that style string is no longer
+# produced anywhere (30 s reps merged into BILLAT per the athlete's request),
+# so the family cannot exist and the old assertion failed on an absence, not
+# on a behaviour. The intent is pinned two ways instead, neither of which
+# can break for the wrong reason:
+#   (a) synthetic: one 12-rep Billat-style set, one session — no trend, no CI,
+#       in the summary AND the explorer, deterministically, no credentials;
+#   (b) live: every 1-session series in the real summary stays blank too.
 print("\n=== a one-session series stays blank, in the summary AND the explorer ===")
-thin = summ[(summ["Type"] == "Ronnestad 30/15") & (summ["Duration"] == "30 s")]
-assert len(thin) == 1, f"expected the thin family to survive, got {len(thin)} row(s)"
-q = thin.iloc[0]
-assert int(q["Sessions"]) == 1, f"expected 1 session, got {q['Sessions']}"
-assert np.isnan(q["W/month"]), f"a one-session series must show no trend, got {q['W/month']}"
-assert np.isnan(q["± 95%"]), f"a one-session series must show no CI, got {q['± 95%']}"
-assert str(q["Trend"]).strip() in ("·", "-", "—", "n/a"), \
-    f"the Trend cell should say there is no trend, not imply a line: {q['Trend']!r}"
-pv_t = run_protocol_view(iv, res["sets"], q["_fam"], q["_db"])
-tr_t = pv_t["trend"]
-assert np.isnan(tr_t["slope_robust"]), "explorer grew a slope from one point"
-assert np.isnan(tr_t["ci"]), "explorer grew a CI from one point"
+from ml.set_evolution import SET_COLUMNS
+_thin_sets = pd.DataFrame([{
+    **{c: np.nan for c in SET_COLUMNS},
+    "activity_id": "thin1", "date": pd.Timestamp("2026-06-01"),
+    "_key": "30s@300w90rpm", "reps": 12, "rep_secs": 30.0, "set_w": 300.0,
+    "intensity": 120.0, "rest": 30.0, "name": "thin", "temp": 20.0, "tsb": 0.0,
+    "db_type": "", "Source": "detected interval",
+}])
+_thin_iv = pd.DataFrame([{
+    "activity_id": "thin1", "date": pd.Timestamp("2026-06-01"),
+    "iv_type": "WORK", "secs": 30.0, "avg_w": 300.0, "np_w": 300.0,
+    "hr_avg": 150.0, "intensity": 120.0, "load": 5.0, "cad_avg": 90.0,
+    "group_id": "30s@300w90rpm", "seq": float(2 * i + 1),
+} for i in range(12)])
+_thin_sets, _ = add_signatures(_thin_sets)
+_thin_res = run_type_comparison(_thin_sets)
+_thin_summ = _thin_res["summary"]
+assert len(_thin_summ) == 1, f"synthetic thin setup grew series: {len(_thin_summ)}"
+_q = _thin_summ.iloc[0]
+assert int(_q["Sessions"]) == 1, f"expected 1 session, got {_q['Sessions']}"
+assert np.isnan(_q["W/month"]), f"a one-session series must show no trend, got {_q['W/month']}"
+assert np.isnan(_q["± 95%"]), f"a one-session series must show no CI, got {_q['± 95%']}"
+assert str(_q["Trend"]).strip() in ("·", "-", "—", "n/a"), \
+    f"the Trend cell should say there is no trend, not imply a line: {_q['Trend']!r}"
+_pv_t = run_protocol_view(_thin_iv, _thin_res["sets"], _q["_fam"], _q["_db"])
+assert _pv_t["ok"], _pv_t.get("reason")
+_tr_t = _pv_t["trend"]
+assert np.isnan(_tr_t["slope_robust"]), "explorer grew a slope from one point"
+assert np.isnan(_tr_t["ci"]), "explorer grew a CI from one point"
+print("  synthetic 1-session series → no W/month, no CI, Trend '·', explorer agrees")
+_live_thin = summ[pd.to_numeric(summ["Sessions"], errors="coerce") == 1]
+for _, _r in _live_thin.iterrows():
+    assert np.isnan(_r["W/month"]) and np.isnan(_r["± 95%"]), \
+        f"live 1-session series {_r['Type']} {_r['Duration']} grew a trend"
+    _pv = run_protocol_view(iv, res["sets"], _r["_fam"], _r["_db"])
+    if _pv["ok"]:
+        assert np.isnan(_pv["trend"]["slope_robust"])
+print(f"  live: {len(_live_thin)} one-session series, all blank")
 print("  1 session → no W/month, no CI, Trend '·', and the explorer agrees")
 
 print("\nOK — fade honest, summary == explorer, and a thin series stays thin")

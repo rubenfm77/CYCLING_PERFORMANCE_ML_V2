@@ -84,22 +84,31 @@ check("template options exist",
       len(seen_options) >= 1, seen_options)
 
 WATT = re.compile(r"\(\d+-\d+W\)|\(\d+W\)")
+STEPW = re.compile(r"\d+w")
 for opt in seen_options:
     codes = render_with(opt)
     check(f"{opt} yields at least one paste block", len(codes) >= 1,
           f"{len(codes)} blocks")
     for i, b in enumerate(codes):
         lines = b.splitlines()
-        check(f"{opt} block {i + 1} has a title with watts",
-              len(lines) > 0 and bool(WATT.search(lines[0])),
+        check(f"{opt} block {i + 1} has a title with %FTP and watts",
+              len(lines) > 0 and "%" in lines[0]
+              and bool(WATT.search(lines[0])),
               lines[0] if lines else "empty")
         check(f"{opt} block {i + 1} has a Main Set",
               "Main Set" in b, b[:120])
         steps = [ln for ln in lines if ln.startswith("- ")]
-        check(f"{opt} block {i + 1} work steps carry %FTP",
-              len(steps) > 0 and all("%" in s for s in steps
-                                     if "ramp" not in s),
-              steps[:3])
+        try:
+            _mi = next(i for i, ln in enumerate(lines)
+                       if ln.startswith("Main Set"))
+            _ci = next(i for i, ln in enumerate(lines)
+                       if ln.startswith("Cooldown"))
+        except StopIteration:
+            _mi, _ci = -1, -1
+        work = [ln for ln in lines[_mi + 1:_ci] if ln.startswith("- ")]
+        check(f"{opt} block {i + 1} main-set steps carry watts",
+              len(work) > 0 and all(bool(STEPW.search(s)) for s in work),
+              work[:3])
 
 print()
 if FAILED:

@@ -841,6 +841,13 @@ REBUILD_LEN_TOL = 0.15       # run length within 15 % of the meter's window
 REBUILD_W_TOL = 0.10         # run watts within 10 % of the meter's watts
 REBUILD_SRC = "rebuilt from detector fragments"
 PEAK_ROW_SRC = "peak meter (intervals.icu)"
+# Same string as ml.set_evolution.DETECTED_SRC, defined here because that
+# module imports this one (importing it back would cycle).
+DETECTED_EFFORT_SRC = "detected interval"
+# A detected effort counts as sustained — and therefore drawable on the day
+# chart — from ten minutes up. Same floor as the peak fill, the FTP detail
+# and phys_class: a 13-second start-line sprint is never an interval.
+LONG_MIN_S = 600.0
 
 
 def _iv_runs(rows: pd.DataFrame) -> list:
@@ -996,6 +1003,71 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
 
 
 # ── per day: the bar-and-line chart ──────────────────────────────────────────
+def _iv_dup_map(iv: pd.DataFrame) -> dict:
+    """{dropped activity id: kept activity id} for double-synced rides.
+
+    Same rule as the sets-level duplicate screen, restated on raw rows
+    because this module cannot import it (that module imports this one):
+    two ids whose first rows share a start second and share one
+    byte-identical (secs, avg watts) WORK row are one ride synced twice.
+    Coherence is longest-block watts over hardest-block watts; below 0.5 the
+    copy merged work into recovery and loses even when it carries the label.
+    Ties keep file order, so identical copies change nothing.
+    """
+    out = {}
+    if iv is None or not len(iv):
+        return out
+    need = {"activity_id", "date", "iv_type", "secs", "avg_w"}
+    if not need.issubset(set(iv.columns)):
+        return out
+    f = iv.copy()
+    f["activity_id"] = f["activity_id"].astype(str)
+    f["_st"] = pd.to_datetime(f["date"], errors="coerce")
+    f["_se"] = pd.to_numeric(f["secs"], errors="coerce").round(0)
+    f["_aw"] = pd.to_numeric(f["avg_w"], errors="coerce").round(0)
+    starts = f.groupby("activity_id", sort=False)["_st"].min()
+    keys = (f[f["iv_type"].astype(str).str.upper() == "WORK"]
+            .assign(_k=lambda d: d["_se"].fillna(-1).astype("int64").astype(str)
+                    + "@" + d["_aw"].fillna(-1).astype("int64").astype(str))
+            .groupby("activity_id", sort=False)["_k"]
+            .apply(lambda s: set(s.dropna().tolist())))
+    per = pd.DataFrame({"st": starts})
+    per["rows"] = per.index.map(
+        lambda a: keys.get(a, set()) if a in keys.index else set())
+    for _, g in per[per["st"].notna()].groupby("st", sort=False):
+        if len(g) < 2:
+            continue
+        ids = list(g.index)
+        if len({frozenset(g.at[a, "rows"]) for a in ids}) == 1 \
+                and all(len(g.at[a, "rows"]) > 0 for a in ids):
+            pass  # identical row sets: fall through to coherence below
+        coh = {}
+        for a in ids:
+            w = f[(f["activity_id"] == a)
+                  & (f["iv_type"].astype(str).str.upper() == "WORK")]
+            w = pd.to_numeric(w["avg_w"], errors="coerce").dropna()
+            if len(w) < 2 or float(w.max()) <= 0:
+                coh[a] = (True, 1.0)
+                continue
+            wl = f.loc[w.index, "secs"]
+            wl = pd.to_numeric(wl, errors="coerce")
+            try:
+                long_w = float(w.loc[wl.idxmax()])
+            except (TypeError, ValueError):
+                coh[a] = (True, 1.0)
+                continue
+            coh[a] = (long_w / float(w.max()) >= 0.5,
+                      long_w / float(w.max()))
+        order = sorted(ids, key=lambda a: (coh[a][0], coh[a][1]),
+                       reverse=True)
+        anchor = order[0]
+        for other in order[1:]:
+            if g.at[anchor, "rows"] and g.at[other, "rows"] and \
+                    (set(g.at[anchor, "rows"]) & set(g.at[other, "rows"])):
+                out[other] = anchor
+    return out
+
+
 def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per sustained effort — session grain, plus what was rebuilt.
 
@@ -1034,6 +1106,31 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
         rb = rebuilt_efforts(iv, df)
         if len(rb):
             reb_by = {a: g for a, g in rb.groupby("activity_id", sort=False)}
+    # Detector rows by activity, for the multi-effort sessions below. A
+    # session whose detector told two (or more) sustained efforts whole gets
+    # one bar per effort — the same bars the Intervals detail draws — instead
+    # of the meter's single summary window. Sustained means LONG_MIN_S and
+    # up: sprint starts never qualify, so this changes nothing below ten
+    # minutes. `iv=None` leaves this empty and every session draws its meter.
+    det_by = {}
+    if iv is not None and len(iv) and "activity_id" in iv.columns:
+        _w = iv[iv["iv_type"].astype(str).str.upper() == "WORK"].copy()
+        _w["secs"] = pd.to_numeric(_w["secs"], errors="coerce")
+        _w["avg_w"] = pd.to_numeric(_w["avg_w"], errors="coerce")
+        _w = _w.dropna(subset=["secs", "avg_w"])
+        _w = _w[_w["secs"] >= LONG_MIN_S]
+        if len(_w):
+            det_by = {a: g for a, g in
+                      _w.groupby(_w["activity_id"].astype(str), sort=False)}
+    # Same ride synced twice under two ids, resolved the same way the
+    # quality gates resolve it (ml.set_evolution 1b): two ids starting at the
+    # same second and sharing a byte-identical row are one ride, and the
+    # coherent copy wins — longest block at half its hardest at least —
+    # because the other copy merged work into recovery. Without this the day
+    # chart would draw the merged 24:47-at-119 W block of 22 Apr 2026 while
+    # the detail draws the copy's real 3x12 min. {dropped id: kept id}.
+    # Local 0.5: same bar as COHERENT_MIN_RATIO over there; kept in sync.
+    dup_keep = _iv_dup_map(iv) if iv is not None and len(iv) else {}
     rows = []
     for i in df.index[ok]:
         d = df.at[i, "date"] if "date" in df.columns else None
@@ -1053,16 +1150,65 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
             "n": 1,
         }
         act = str(df.at[i, "id"]) if "id" in df.columns else ""
-        hits = reb_by.get(act)
+        look = dup_keep.get(act, act)
+        # A dropped copy's own rebuilds are built from its merged
+        # segmentation — suspect by the same verdict that dropped it — so
+        # only the kept copy's rows (detected below) may draw for this ride.
+        hits = reb_by.get(act) if act not in dup_keep else None
         if hits is not None and len(hits):
+            consumed = set()
             for r in hits.itertuples(index=False):
                 rows.append({**base, "secs": int(r.secs), "cls": r.cls,
                              "w": float(r.w), "source": REBUILD_SRC,
                              "pieces": r.pieces})
+                try:
+                    for _sq in (tuple(r.seqs) if hasattr(r, "seqs")
+                                and r.seqs is not None else ()):
+                        consumed.add(float(_sq))
+                except (TypeError, ValueError):
+                    pass
+            # A sustained fragment the runs did NOT swallow is its own
+            # effort, not the runs counted twice: same (activity, seq) rule
+            # the detail uses, so both pages draw it or neither does.
+            det = det_by.get(look)
+            if det is not None and len(det) and "seq" in det.columns:
+                _sq = pd.to_numeric(det["seq"], errors="coerce")
+                for r in det[_sq.apply(lambda x: not (
+                        np.isfinite(x) and float(x) in consumed)
+                        if pd.notna(x) else True)].itertuples(index=False):
+                    try:
+                        _rs, _rw = float(r.secs), float(r.avg_w)
+                    except (TypeError, ValueError):
+                        continue
+                    rows.append({**base, "secs": int(round(_rs)),
+                                 "cls": rep_class(_rs), "w": float(_rw),
+                                 "source": DETECTED_EFFORT_SRC, "pieces": ""})
+            continue
+        # No rebuild: the detector's own sustained efforts draw alongside —
+        # and, where they share the meter window's class, INSTEAD OF — the
+        # meter. A 3x20 session the detector told whole draws three bars, not
+        # the meter's one summary; a lone fragment in another class draws
+        # beside the meter because it is a different effort, not the same one
+        # counted twice. Rows come from the coherent copy where the ride
+        # synced twice, so a merged block never draws here.
+        det = det_by.get(look)
+        meter_cls = rep_class(float(s.at[i]))
+        drew = False
+        if det is not None and len(det):
+            for r in det.itertuples(index=False):
+                try:
+                    _rs, _rw = float(r.secs), float(r.avg_w)
+                except (TypeError, ValueError):
+                    continue
+                rows.append({**base, "secs": int(round(_rs)),
+                             "cls": rep_class(_rs), "w": float(_rw),
+                             "source": DETECTED_EFFORT_SRC, "pieces": ""})
+                drew = drew or (rep_class(_rs) == meter_cls)
+        if drew:
             continue
         rows.append({**base,
                      "secs": int(round(float(s.at[i]))),
-                     "cls": rep_class(float(s.at[i])),
+                     "cls": meter_cls,
                      "w": float(w.at[i]),
                      "source": PEAK_ROW_SRC,
                      "pieces": ""})

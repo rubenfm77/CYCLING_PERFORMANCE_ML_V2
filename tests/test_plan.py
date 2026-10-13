@@ -82,14 +82,15 @@ check("repeat count rides on the header line",
 check("blank line before AND after every repeat block",
       "\n\nMain Set 2x\n" in t and "\n\nCooldown\n" in t
       and "\n\nWarmup\n" in t, repr(t[:60]))
-check("steps carry duration, %FTP target and cadence",
-      "- 20m 90-95% 90rpm" in t.splitlines()
-      and "- 10m 50% 90rpm" in t.splitlines())
+check("steps carry duration, watts and cadence (%FTP in the title)",
+      "- 20m 216-228w 90rpm" in t.splitlines()
+      and "- 10m 120w 90rpm" in t.splitlines()
+      and t.splitlines()[0] == "FTP 2x20min @ 90-95% (216-228W)")
 check("a single effort has no repeat header",
-      "Main Set\n- 20m 90-95% 90rpm" in
+      "Main Set\n- 20m 216-228w 90rpm" in
       PL.icu_text("FTP 20min", 20.0, 1, "90-95%", None))
 check("short reps keep seconds, never 0 min",
-      "- 30s 120-130% 90rpm" in
+      "- 30s 288-312w 90rpm" in
       PL.icu_text("BILLAT 10x30s", 0.5, 10, "120-130%", 0.5).splitlines())
 
 print()
@@ -162,18 +163,19 @@ check("one trailing note line, never a second repeat header",
 sb = PL.build_session("BILLAT", 0.5, 20, 0.5, ftp=240.0)
 check("billat flattens: no nested repeats, 5 min every 10 pairs",
       "Main Set 20x" not in sb["text"]
-      and sb["text"].count("- 30s 120% 90rpm") == 20
-      and sb["text"].count("- 5m 50% 90rpm") == 1)
+      and sb["text"].count("- 30s 288w 90rpm") == 20
+      and sb["text"].count("- 5m 120w 90rpm") == 1)
 st_ = PL.build_session("TORQUE", 8.0, 5, 5.0, ftp=240.0)
 check("low-cadence work carries its own cadence",
-      "- 8m 85-95% 55rpm" in st_["text"].splitlines())
+      "- 8m 204-228w 55rpm" in st_["text"].splitlines())
 sr = PL.build_session("REC", 45.0, 1, None, ftp=240.0)
 check("recovery week still pastes: spin plus a note",
-      "- 45m 50% 90rpm" in sr["text"].splitlines())
+      "- 45m 120w 90rpm" in sr["text"].splitlines())
 sz = PL.build_session("Z2", 120.0, 1, None, ftp=240.0)
-check("endurance block reads 56-75% with book watts",
-      "- 120m 56-75% 90rpm" in sz["text"].splitlines()
-      and "(134-180W)" in sz["title"], sz["title"])
+check("endurance block reads watts with book %FTP in the title",
+      "- 120m 134-180w 90rpm" in sz["text"].splitlines()
+      and "(134-180W)" in sz["title"]
+      and "56-75%" in sz["title"], sz["title"])
 tab = PL.session_table([{**s20, "day": "Sat", "date": "2026-10-17"},
                         {**sb, "day": "Wed", "date": "2026-10-14"}])
 check("the summary table lists every pasteable session",

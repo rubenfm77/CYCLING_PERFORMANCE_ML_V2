@@ -39,7 +39,7 @@ import pandas as pd
 from pathlib import Path
 
 from ml.set_evolution import DETECTED_SRC, PEAK_SRC, SET_COLUMNS
-from ml.protocol_reps import run_protocol_view
+from ml.protocol_reps import FAMILY_FLOOR_S, run_protocol_view
 
 print("=" * 74)
 print("1. the rules, on synthetic sets and rows")
@@ -216,14 +216,28 @@ else:
     s = prep_types(s)
     s = s.assign(lab=[dur_class_label(b) for b in s["dur_b"]])
 
-    bad = dropped_days = dup = inv = unknown_src = 0
+    bad = dropped_days = dup = inv = unknown_src = floored = 0
     for (fam, lab), g in s.groupby(["family", "lab"]):
         for db in g["dur_b"].unique():
             sub = g[np.isclose(g["dur_b"].astype(float), float(db))]
+            _fl = FAMILY_FLOOR_S.get(fam)
+            if _fl:
+                _rs = pd.to_numeric(sub["rep_secs"], errors="coerce")
+                keep = sub[_rs.fillna(float("inf")) >= float(_fl)]
+            else:
+                keep = sub
             pv = run_protocol_view(iv, s, fam, float(db))
             if not pv["ok"]:
+                # The only acceptable refusal is the family protocol floor:
+                # every set below it, all of them counted, none half-drawn.
+                assert fam in FAMILY_FLOOR_S, \
+                    f"{fam} {lab} dur_b={db} refused without a floor"
+                assert pv.get("n_hidden_sets", 0) == len(sub), \
+                    (f"{fam} {lab} dur_b={db}: hidden "
+                     f"{pv.get('n_hidden_sets')} of {len(sub)} sets")
+                floored += 1
                 continue
-            want = pd.to_datetime(sub["date"]).dt.normalize().nunique()
+            want = pd.to_datetime(keep["date"]).dt.normalize().nunique()
             if pv["n_sessions"] != want:
                 bad += 1
                 print(f"   {fam} {lab} dur_b={db}: {pv['n_sessions']} sessions "
@@ -245,7 +259,7 @@ else:
                     unknown_src += 1
                     print(f"   {fam} {lab} dur_b={db}: a bar does not state "
                           f"which instrument reported it")
-            lost = set(pd.to_datetime(sub["date"]).dt.normalize()) - \
+            lost = set(pd.to_datetime(keep["date"]).dt.normalize()) - \
                 set(pd.to_datetime(ss["date"]).dt.normalize())
             if lost:
                 dropped_days += len(lost)
@@ -255,7 +269,7 @@ else:
     n_series = sum(len(g["dur_b"].unique()) for _, g in s.groupby(["family",
                                                                   "lab"]))
     print(f"   {n_series} series checked · {n_peak} peak readings in the "
-          f"sets table")
+          f"sets table · {floored} series honourably refused by family floor")
     assert bad == 0, f"{bad} series lost a session"
     assert dropped_days == 0, f"{dropped_days} days dropped from the line"
     assert dup == 0, "a date got two session rows"

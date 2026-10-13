@@ -1,8 +1,8 @@
 """One bar per effort ridden — never two, never zero.
 
 The reported case: the athlete rides 2x20 min, but the Intervals detail and
-the Evolution chart show ONE interval per session. Three mechanisms caused
-it, each pinned here on synthetic frames (no files, no credentials):
+the Evolution chart show ONE interval per session. Mechanisms caused it,
+each pinned here on synthetic frames (no files, no credentials):
 
   1. the CLASS SPLIT: a 19:17 and a 20:07 of one session landed in
      "10-20 min" and "20-30 min" — each chart drew one. The tolerance rule
@@ -16,6 +16,13 @@ it, each pinned here on synthetic frames (no files, no credentials):
      very fragments it was joined from — 683 s + 1260 s for one 20-minute
      effort. Consumed fragments are not drawn again, matched on
      (activity, seq) so a genuine second effort is never mistaken for one.
+  4. the WRONG GRAIN: a 3x20 session the detector told whole drew the
+     meter's one summary bar on Evolution while the detail drew three. The
+     day chart now draws every sustained detector effort instead of the
+     meter where they share its class — same bars both pages.
+  5. the NOISE FLOOR: start-line sprint fragments inside FTP sessions drew
+     as "FTP · under 90s" (22 sessions, 37 sets). The detail reviews FTP at
+     10 min and up, VO2MAX at 90 s and up — counted, never silent.
 
 Run:  python tests/test_pair_honesty.py     (exit 0 = pass, 1 = fail)
 """
@@ -31,12 +38,13 @@ os.chdir(ROOT)
 import numpy as np
 import pandas as pd
 
-from ml.interval_watts import (rep_class, rebuilt_efforts,
+from ml.interval_watts import (rep_class, rebuilt_efforts, effort_best,
                                REBUILD_SRC, PEAK_ROW_SRC)
 from ml.set_evolution import (build_sets, fill_peak_efforts, quality_gates,
                               SWAP_REASON, DUP_REASON)
 from ml.type_comparison import (dur_bucket, dur_class_label, fmt_min,
                                 series_sel)
+from ml.protocol_reps import FAMILY_FLOOR_S, run_protocol_view
 
 FAILED = []
 
@@ -207,6 +215,90 @@ solo = _uncovered_sets(sel, reps, consumed)
 check("the swallowed set is not solo-drawn beside the run",
       set(solo["_key"].astype(str)) == {"rebuilt:i9:1212s"},
       solo["_key"].tolist() if len(solo) else "no solo bars")
+
+print()
+print("=" * 74)
+print("5. the review floor and the day chart's grain")
+print("=" * 74)
+
+
+def _pv_sets(rows):
+    f = pd.DataFrame(rows)
+    f["date"] = pd.to_datetime("2026-05-01")
+    for c in ("temp", "tsb", "name"):
+        f[c] = "" if c == "name" else np.nan
+    return f
+
+
+def _pv_iv(rows, act="m1"):
+    out = pd.DataFrame([{"activity_id": act,
+                         "date": pd.Timestamp("2026-05-01"),
+                         "iv_type": t, "secs": float(s),
+                         "avg_w": float(w), "np_w": np.nan,
+                         "hr_avg": np.nan, "intensity": np.nan,
+                         "load": np.nan, "cad_avg": np.nan,
+                         "group_id": g, "seq": float(i + 1)}
+                        for i, (t, s, w, g) in enumerate(rows)])
+    return out
+
+
+_psets = _pv_sets([
+    {"activity_id": "m1", "_key": "g20", "family": "FTP", "reps": 3,
+     "rep_secs": 1206.0, "set_w": 212.0, "dur_b": 20.0,
+     "dur_cls": "10-20 min", "intensity": 90.0, "Source": "detected"},
+    {"activity_id": "m1", "_key": "solo:13", "family": "FTP", "reps": 1,
+     "rep_secs": 13.0, "set_w": 410.0, "dur_b": 0.0,
+     "dur_cls": "under 90s", "intensity": np.nan, "Source": "detected"},
+    {"activity_id": "m1", "_key": "solo:60", "family": "VO2MAX", "reps": 1,
+     "rep_secs": 60.0, "set_w": 250.0, "dur_b": 1.0,
+     "dur_cls": "90s-5min", "intensity": 100.0, "Source": "detected"},
+    {"activity_id": "m1", "_key": "bg30", "family": "BILLAT", "reps": 10,
+     "rep_secs": 30.0, "set_w": 300.0, "dur_b": 0.5,
+     "dur_cls": "under 90s", "intensity": 120.0, "Source": "detected"},
+])
+_piv = _pv_iv([("WORK", 1206, 212, "g20"), ("WORK", 1204, 213, "g20"),
+               ("WORK", 1207, 214, "g20"), ("WORK", 13, 410, None),
+               ("WORK", 60, 250, None)] + [("WORK", 30, 300, "bg30")] * 10)
+check("floors are FTP 10 min, VO2MAX 90 s",
+      FAMILY_FLOOR_S == {"FTP": 600.0, "VO2MAX": 90.0}, FAMILY_FLOOR_S)
+_pv = run_protocol_view(_piv, _psets, "FTP", None, "10-20 min")
+check("FTP detail draws the 3x20, not the 13 s sprint start",
+      _pv["ok"] and len(_pv["bars"]) == 3
+      and int(_pv["bars"]["secs"].min()) >= 600, len(_pv["bars"]))
+_pv0 = run_protocol_view(_piv, _psets, "FTP", 0.0)
+check("an FTP series below the floor is refused and counted",
+      (not _pv0["ok"]) and _pv0.get("n_hidden_sets") == 1,
+      (_pv0.get("reason"), _pv0.get("n_hidden_sets")))
+_pv1 = run_protocol_view(_piv, _psets, "VO2MAX", 1.0)
+check("a 60 s VO2MAX single is below its floor too",
+      (not _pv1["ok"]) and _pv1.get("n_hidden_sets") == 1)
+_pvb = run_protocol_view(_piv, _psets, "BILLAT", 0.5)
+check("Billat keeps its 30 s work — no floor there",
+      _pvb["ok"] and len(_pvb["bars"]) == 10, len(_pvb["bars"]))
+
+_mdf = pd.DataFrame([{"id": "m1", "date": pd.Timestamp("2026-05-01"),
+                      "training_type": "FTP", "icu_pm_ftp_watts": 240.0,
+                      "icu_pm_ftp_secs": 1200.0}])
+_miv = _pv_iv([("WORK", 734, 244, "g"), ("WORK", 725, 247, "g"),
+               ("WORK", 736, 246, "g")])
+_eb = effort_best(_mdf, _miv)
+check("the day chart draws all three detected 12s instead of the meter",
+      len(_eb) == 3
+      and set(_eb["source"]) == {"detected interval"}
+      and sorted(int(s) for s in _eb["secs"]) == [725, 734, 736],
+      _eb[["secs", "source"]].to_dict("records") if len(_eb) else "none")
+_mdf2 = pd.DataFrame([{"id": "m2", "date": pd.Timestamp("2026-05-02"),
+                       "training_type": "FTP", "icu_pm_ftp_watts": 195.0,
+                       "icu_pm_ftp_secs": 1702.0}])
+_miv2 = _pv_iv([("WORK", 742, 244, "g742")], act="m2")
+_eb2 = effort_best(_mdf2, _miv2)
+check("a lone fragment in another class draws beside the meter",
+      len(_eb2) == 2
+      and sorted(_eb2["cls"]) == ["10-20 min", "20-30 min"],
+      _eb2[["secs", "cls"]].to_dict("records") if len(_eb2) else "none")
+_eb3 = effort_best(_mdf, None)
+check("without the cache nothing changes: one meter row",
+      len(_eb3) == 1 and _eb3["source"].iloc[0] == PEAK_ROW_SRC)
 
 print()
 if FAILED:

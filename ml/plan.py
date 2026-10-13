@@ -284,22 +284,33 @@ def build_session(family: str, nominal_min: float, reps: int,
     else:
         rest_min = float(rest_min)
     cad = BOOK_CADENCE.get(family, BOOK_DEFAULT_CADENCE)
+
+    def _wstep(t: str, c: str = None) -> str:
+        """A work step in absolute watts: `- 20m 228-240w 90rpm`."""
+        lo, hi = watts(t, ftp)
+        wtxt = f"{lo}-{hi}w" if hi != lo else f"{lo}w"
+        return wtxt, (c or cad)
+
+    _wt, _wc = _wstep(target)
+    _rt, _ = _wstep("50%")
+    _bt, _ = _wstep("55%")
     if family == "BILLAT" and nom <= 1.0:
+        _ot, _oc = _wstep("120%", "90rpm")
         main = []
         for i in range(n):
-            main.append(("30s", "120%", "90rpm"))
-            main.append((f"{fmt_dur(rest_min)}", "55%", "90rpm"))
+            main.append(("30s", _ot, _oc))
+            main.append((f"{fmt_dur(rest_min)}", _bt, BOOK_DEFAULT_CADENCE))
             if (i + 1) % 10 == 0 and i + 1 < n:
-                main.append(("5m", "50%", "90rpm"))
+                main.append(("5m", _rt, BOOK_DEFAULT_CADENCE))
         rep_header = None
         work_desc = f"{n}x30s on/off"
     elif n > 1:
-        main = [(fmt_dur(nom), target, cad),
-                (fmt_dur(rest_min), "50%", BOOK_DEFAULT_CADENCE)]
+        main = [(fmt_dur(nom), _wt, _wc),
+                (fmt_dur(rest_min), _rt, BOOK_DEFAULT_CADENCE)]
         rep_header = f"Main Set {n}x"
         work_desc = f"{n}x{fmt_dur(nom)}"
     else:
-        main = [(fmt_dur(nom), target, cad)]
+        main = [(fmt_dur(nom), _wt, _wc)]
         rep_header = None
         work_desc = fmt_dur(nom)
     base = f"{family} {work_desc}".strip()
@@ -401,17 +412,23 @@ def icu_text(title: str, nominal_min: float, reps: int, target: str,
     """
     dur = fmt_dur(float(nominal_min))
     wline = _watts_suffix(target, ftp)
+    _lo, _hi = watts(target, ftp)
+    _wtxt = (f"{_lo}-{_hi}w" if _hi != _lo else f"{_lo}w") \
+        if _lo is not None else target
+    _rlo, _rhi = watts("50%", ftp)
+    _rtxt = (f"{_rlo}-{_rhi}w" if _rhi != _rlo else f"{_rlo}w") \
+        if _rlo is not None else "50%"
     lines = [f"{title} @ {target}{wline}", "", "Warmup"]
     lines += [f"- {d} {t} {c}" for d, t, c in BOOK_WARMUP]
     lines += [""]
     if reps and int(reps) > 1:
         lines += [f"Main Set {int(reps)}x",
-                  f"- {dur} {target} {cadence}"]
+                  f"- {dur} {_wtxt} {cadence}"]
         if rest_min:
-            lines += [f"- {fmt_dur(float(rest_min))} 50% {cadence}"]
+            lines += [f"- {fmt_dur(float(rest_min))} {_rtxt} {cadence}"]
         lines += [""]
     else:
-        lines += ["Main Set", f"- {dur} {target} {cadence}"]
+        lines += ["Main Set", f"- {dur} {_wtxt} {cadence}"]
         lines += [""]
     lines += ["Cooldown"]
     lines += [f"- {d} {t} {c}" for d, t, c in BOOK_COOLDOWN]

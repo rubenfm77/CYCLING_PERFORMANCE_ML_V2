@@ -25,7 +25,7 @@ os.chdir(ROOT)
 import numpy as np
 import pandas as pd
 
-from core.data import _apply_english_labels, load_data
+from core.data import _apply_english_labels, _label_from_description, load_data
 from core.interval_data import match_threshold_run
 from core.theme import FTP_DRIVERS, MAIN_TYPES, TYPE_ENGLISH
 
@@ -58,6 +58,21 @@ check("mapping is 1:1 — no two names merge",
 check("blanks are never translated",
       f["training_type"].iloc[-2] == "—"
       and pd.isna(f["training_type"].iloc[-1]))
+
+print()
+print("=" * 74)
+print("1b. the intervals.icu Description is read like the older model")
+print("=" * 74)
+for text, want in [("FTP 2x20min", "FTP"), ("Morning END ride", "END"),
+                   ("AEROBIC BASE z2", "AEROBIC BASE"),
+                   ("VO2 MAX intervals", "VO2MAX"),
+                   ("2x20 FTP threshold", "FTP"),
+                   ("PIRAMIDAL session", "PIRAMIDAL"),
+                   ("around the bEND", None), ("FT", None),
+                   ("", None), (None, None)]:
+    check(f"{text!r} -> {want!r}",
+          _label_from_description(text) == want,
+          _label_from_description(text))
 
 print()
 print("=" * 74)

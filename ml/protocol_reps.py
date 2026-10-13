@@ -348,6 +348,19 @@ def _carry_sessions(sess: pd.DataFrame, left: pd.DataFrame) -> pd.DataFrame:
 
 
 
+# ── Family protocol floors for the detail ─────────────────────────────────
+# The athlete's taxonomy, stated plainly: 30 s work is BILLAT, under-10-min
+# repeat work is VO2MAX, FTP work is sustained (10 min and up). A 13-second
+# start-line acceleration inside a 2x20 workout is detector truth but it is
+# not an FTP interval, and charting 37 of them as "FTP · under 90s" is how a
+# threshold review fills with neuromuscular noise. So the DETAIL — this
+# function only, never the comparison table and never Evolution's classes —
+# charts sets at or above the family's floor: FTP >= 600 s, VO2MAX >= 90 s,
+# every other family unfiltered. Hidden sets are counted (n_hidden_sets),
+# never silently dropped; their sessions keep every set they hold elsewhere.
+FAMILY_FLOOR_S = {"FTP": 600.0, "VO2MAX": 90.0}
+
+
 def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
                       dur_b: float | None = None,
                       dur_cls: str | None = None) -> dict:
@@ -363,6 +376,16 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
     sel = series_sel(sets, family, dur_b, dur_cls).copy()
     if not len(sel):
         return {"ok": False, "reason": "No sets in that series."}
+    n_hidden_sets = 0
+    _floor = FAMILY_FLOOR_S.get(family)
+    if _floor:
+        _rs = pd.to_numeric(sel["rep_secs"], errors="coerce")
+        _keep = _rs.fillna(float("inf")) >= float(_floor)
+        n_hidden_sets = int((~_keep).sum())
+        sel = sel[_keep].copy()
+        if not len(sel):
+            return {"ok": False, "reason": "No sets in that series.",
+                    "n_hidden_sets": n_hidden_sets}
 
     reps, consumed = _set_members(iv, sel)
     # A set that owns no raw member row — a peak-meter reading, whose single
@@ -479,4 +502,5 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
                                       errors="coerce").notna().any() else np.nan),
         )
     return {"ok": True, "bars": bars, "sessions": sess, "trend": trend,
-            "n_reps": int(len(bars)), "n_sessions": int(len(sess))}
+            "n_reps": int(len(bars)), "n_sessions": int(len(sess)),
+            "n_hidden_sets": int(n_hidden_sets)}

@@ -22,7 +22,7 @@ from core.theme import C, H_HERO, H_PAIR, H_STD, SURGERY, style_figure
 from ml.composition_intervals import run_composition
 from ml.exertion_forecast import metric_counts, run_exertion_forecast
 from ml.interval_forecast import run_band_forecast
-from ml.protocol_reps import run_protocol_view
+from ml.protocol_reps import FAMILY_FLOOR_S, run_protocol_view
 from ml.interval_watts import series_name
 from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, REBUILD_SRC,
                               add_signatures,
@@ -868,6 +868,11 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                               key="iv_type_fam")
     fam = fam_lab[fam_choice]
     gf = res["sets"][res["sets"]["family"] == fam]
+    _fl = FAMILY_FLOOR_S.get(fam)
+    if _fl:
+        gf = gf[pd.to_numeric(gf["rep_secs"],
+                              errors="coerce").fillna(float("inf"))
+                >= float(_fl)].copy()
     # The options are Evolution's rep-length bands with the athlete's own
     # tolerance: anything under 22:00 is "10-20 min", so a 20:00, a 20:07
     # and a 21:00 sit in ONE option instead of three — one criterion, one
@@ -886,13 +891,22 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                f"substitution. Same classes as the Evolution day chart: "
                f"every day it draws for this class is a session here too.")
 
-    pv = _protocol_view_cached(iv_full, res["sets"], fam, None, cls)
+    pv = _protocol_view_cached(iv_full, gf, fam, None, cls)
     if not pv.get("ok"):
         callout("No intervals for that series", pv.get("reason", "—"),
                 C["yellow"], icon="⏸️")
         return
     sess, bars, tr = pv["sessions"], pv["bars"], (pv.get("trend") or {})
-    stt = series_stats(res["sets"], fam, dur_cls=cls)
+    stt = series_stats(gf, fam, dur_cls=cls)
+    if _fl:
+        _nh = int(pv.get("n_hidden_sets", 0) or 0)
+        _fl_txt = (f"{_fl / 60:.0f} min" if _fl >= 600
+                   else f"{_fl:.0f} s")
+        st.caption(f"Review floor: {fam_name} charts efforts of "
+                   f"{_fl_txt} and up — shorter fragments from those "
+                   f"sessions (sprint starts, {_nh} set(s) here) are not "
+                   f"{fam_name} work and are not drawn. Nothing else is "
+                   f"hidden.")
     slope, ci = tr.get("slope_robust", np.nan), tr.get("ci", np.nan)
     clear = (not np.isnan(ci)) and abs(slope) > ci and abs(slope) >= 1.0
     n_sets = int(pd.to_numeric(sess["sets"], errors="coerce")

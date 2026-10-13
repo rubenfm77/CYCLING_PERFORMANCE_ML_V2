@@ -6,11 +6,103 @@ import streamlit as st
 from pathlib import Path
 from plotly.subplots import make_subplots
 
-from core.components import callout, legend, metric_card, page_header, section, show
+from core.components import (callout, legend, metric_card,
+                             page_header, section, show)
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, H_CARD, H_HERO, H_PAIR, H_STD,
                         STATE_COLORS, SURGERY, WEIGHT_KG, style_figure)
+from ml import efficiency as ef
 from ml import interval_watts as iw
 from views.interval_watts import fitness_section
+
+
+def _book_section(df_all, iv):
+    """Efficiency & readiness, the book's method, in English.
+
+    Monthly EF medians (session grain — the file cannot do per-interval EF),
+    monthly decoupling medians off the detector's own rows, and the present
+    moment placed on the readiness × performance nine-quadrant matrix. RPP
+    is reported as a gap (no RPE in the file), never faked.
+    """
+    section("⚙️ Efficiency & readiness — book method")
+    st.caption(
+        "Aerobic efficiency (power/HR) and decoupling (power:HR drift) on "
+        "sustained work, tracked month by month the way the book tracks "
+        "them on repeated efforts — then the present moment on its "
+        "nine-quadrant readiness matrix. Every point carries its n."
+    )
+    efm = ef.monthly_ef(df_all)
+    c1, c2 = st.columns(2)
+    with c1:
+        if len(efm):
+            fig = go.Figure(go.Scatter(
+                x=efm["month"], y=efm["med_ef"], mode="lines+markers",
+                name="Median EF (NP/HR)", marker_color=C["green"],
+                customdata=[[f"n = {int(n)}"] for n in efm["n"]],
+                hovertemplate="%{x|%b %Y}<br>EF %{y:.2f}<br>"
+                              "%{customdata[0]}<extra></extra>"))
+            style_figure(fig, "Efficiency Factor — monthly median",
+                         H_PAIR)
+            fig.update_xaxes(type="date")
+            show(fig)
+            st.caption(f"{len(efm)} month(s), "
+                       f"{int(efm['n'].sum()):,} sessions with heart rate. "
+                       f"Session grain: the file carries session means, so "
+                       f"per-interval EF drift is not claimed.")
+        else:
+            callout("No heart-rate data", "No session carries HR — EF needs "
+                    "it.", C["yellow"], icon="⏸️")
+    with c2:
+        dec = ef.monthly_decoupling(iv)
+        if len(dec):
+            fig = go.Figure(go.Bar(
+                x=dec["month"], y=dec["med_dec"], name="Median decoupling %",
+                marker_color=C["accent"], opacity=0.85,
+                customdata=[[f"n = {int(n)}"] for n in dec["n"]],
+                hovertemplate="%{x|%b %Y}<br>decoupling %{y:.1f} %<br>"
+                              "%{customdata[0]}<extra></extra>"))
+            style_figure(fig, "Aerobic decoupling — monthly median, "
+                         "detector rows", H_PAIR)
+            fig.update_xaxes(type="date")
+            show(fig)
+            st.caption(f"{len(dec)} month(s), {int(dec['n'].sum()):,} "
+                       f"detector rows. Shown, not graded: the book's "
+                       f"stimulus bands need within-session splits the file "
+                       f"does not hold.")
+        else:
+            callout("No decoupling rows", "No detector row carries a drift "
+                    "value.", C["yellow"], icon="⏸️")
+    _rpp = ef.rpp_status(df_all)
+    if _rpp["rpe_n"]:
+        st.caption(f"RPP (power/RPE): {_rpp['rpe_n']} session(s) carry RPE.")
+    else:
+        st.caption("**No RPP table: no per-session RPE in this file "
+                   f"({_rpp['sessions']:,} sessions checked).** RPP is power "
+                   "over perceived exertion on a repeated standard effort — "
+                   "it needs RPE logged per session to exist. Log it and "
+                   "this table appears; until then it stays blank rather "
+                   "than guessed.")
+    # The nine quadrants, current cell marked.
+    _tsb = float(pd.to_numeric(
+        df_all.sort_values("date")["tsb"], errors="coerce").dropna().iloc[-1]) \
+        if "tsb" in df_all.columns and len(df_all) else float("nan")
+    _d, _src = ef.perf_delta(df_all)
+    _q = ef.readiness(_tsb, _d)
+    st.caption(f"Readiness from TSB ({_tsb:+.1f}), performance from "
+               f"{'Δ' + _src + ' ' + f'{_d:+.1f}' if _src != 'none' else '—'} "
+               f"over 28 days. Cell {_q['no']} of 9 is now.")
+    _order = [("up", "low"), ("up", "mid"), ("up", "high"),
+              ("hold", "low"), ("hold", "mid"), ("hold", "high"),
+              ("down", "low"), ("down", "mid"), ("down", "high")]
+    for _r in range(3):
+        _cc = st.columns(3)
+        for _c in range(3):
+            _pb, _rb = _order[_r * 3 + _c]
+            _no, _ti, _su = ef.QUADRANTS[(_pb, _rb)]
+            _cur = (_pb == _q["perf"] and _rb == _q["readiness"])
+            with _cc[_c]:
+                metric_card(f"{_no}. {_ti}" + ("  ◀ NOW" if _cur else ""),
+                            _su or "—",
+                            accent=(C["green"] if _cur else C["muted"]))
 
 
 def render(head, ctx):
@@ -227,6 +319,9 @@ def render(head, ctx):
     except Exception:                                    # noqa: BLE001
         _iv_fit = None
     fitness_section(df_all, _iv_fit)
+
+    # ── Efficiency & readiness (book method) ─────────────────────────────
+    _book_section(df_all, _iv_fit)
 
     # ── FTP progression ────────────────────────────────────────────────────
     section("📈 FTP progression — month by month")

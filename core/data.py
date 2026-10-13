@@ -139,8 +139,32 @@ _API_STATUS: dict = {"ok": False, "rows": 0, "newest": None, "error": None,
 
 _KNOWN_TYPES = [
     "AEROBIC BASE", "VO2MAX", "VO2 MAX", "Q-I INTERVALS", "FATMAX",
-    "PYRAMID", "BILLAT", "TORQUE", "TEMPO", "END", "FTP", "SST",
+    "PIRAMIDAL", "PYRAMID", "BILLAT", "TORQUE", "TEMPO", "END", "FTP", "SST",
+    "SPRINTS", "REC",
 ]
+
+
+def _label_from_description(text) -> str | None:
+    """The athlete's own label, typed into the intervals.icu Description.
+
+    The older model found every recent label this way (the account holds no
+    workout documents, so the workout-doc fields are always blank): the
+    athlete types the training type ("END", "FTP", "VO2MAX" …) into the
+    activity Description and the API returns it. Same standalone-word rule
+    as the older model — longest names first, so "AEROBIC BASE" wins over
+    any substring, and creative titles ("around the bEND", "End of season
+    party") never match because the token needs blanks on both sides.
+    Returns the label or None (never a guess, never a blank token).
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    hay = " " + re.sub(r"[^A-Z0-9 ]", " ", text.upper())
+    hay = re.sub(r"\s+", " ", hay) + " "
+    for t in sorted(_KNOWN_TYPES, key=len, reverse=True):
+        tok = re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", t)).strip()
+        if f" {tok} " in hay:
+            return "VO2MAX" if t == "VO2 MAX" else t
+    return None
 _CANDIDATE_COLS = [
     "icu_workout_name", "workout_name", "workout_doc_name",
     "pairedWorkoutName", "paired_workout_name", "icu_workout", "workout",
@@ -194,6 +218,7 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
         "average_watts": "power_avg", "weighted_average_watts": "power_np",
         "max_watts": "power_max", "average_heartrate": "hr_avg",
         "average_cadence": "cadence", "average_temp": "temp_avg",
+        "description": "icu_description",
         "icu_training_load": "tss", "icu_intensity": "if_score",
         "icu_eftp": "eftp", "icu_fitness": "ctl", "icu_fatigue": "atl",
         "icu_average_watts": "power_avg_icu", "icu_normalized_watts": "power_np_icu",
@@ -210,7 +235,19 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     if "power_np" not in df.columns:
         df["power_np"] = df.get("power_avg", pd.Series([np.nan] * len(df)))
     df["weight"] = WEIGHT_KG
-    df["training_type"] = df.apply(_match_type, axis=1)
+    # Label source 1: the intervals.icu Description, exactly like the older
+    # model — the athlete types the type there, first thing. Only then the
+    # workout-doc matcher (always blank on this account), and only then the
+    # CSV carry below fills what is still blank. An athlete label anywhere in
+    # this chain always beats every rule after it.
+    if "icu_description" in df.columns:
+        _desc_lab = df["icu_description"].map(_label_from_description)
+    else:
+        _desc_lab = pd.Series(None, index=df.index)
+    df["training_type"] = [
+        d if d else (m if m != "—" else "—")
+        for d, m in zip(_desc_lab, df.apply(_match_type, axis=1))
+    ]
     _API_STATUS.update({
         "ok": True,
         "rows": int(len(df)),
@@ -253,13 +290,14 @@ def _carry_csv_labels(base: pd.DataFrame, recent: pd.DataFrame) -> int:
     """Move the Excel's `training_type` from the CSV row onto the API row for the
     same ride, BEFORE the CSV rows are discarded.
 
-    Why this has to exist: the trailing 60 days are rebuilt from intervals.icu, and
-    that API can never report a label — the account holds no workout documents, so
-    `_match_type` returns the blank token for every one of its rows. The merge
-    replaced each CSV row on a shared date with its API twin, so any session the
-    athlete had labelled inside the last two months silently lost its type and
-    vanished from every type-based view. That is the two months that matter most,
-    because it is the present.
+    Why this has to exist: the trailing 60 days are rebuilt from intervals.icu,
+    whose workout-doc fields are always blank on this account — but whose
+    activity Description carries the label the athlete typed (read first, in
+    `_fetch_from_api`). Whatever Description did not name still arrives blank
+    here. The merge replaced each CSV row on a shared date with its API twin,
+    so any session the athlete had labelled inside the last two months
+    silently lost its type and vanished from every type-based view. That is
+    the two months that matter most, because it is the present.
 
     Matching uses the same calendar day and the same 90 s duration window as the
     duplicate-ride rule below, so two genuinely different rides on one day never
@@ -458,20 +496,22 @@ def load_data() -> pd.DataFrame:
             df["eftp"] = _eftp
 
     # ── Transparent FTP auto-label ─────────────────────────────────────────
-    # intervals.icu only reports a training type when the workout itself carries
-    # a name. Unlabelled sessions (131 of 1,164 here) therefore disappear from every
-    # type-based view — including genuine threshold work. `_match_type` returns "—"
-    # for those; the Garmin-sourced rows arrive as NaN.
+    # intervals.icu reports a training type two ways: the activity Description
+    # the athlete types (read first, in `_fetch_from_api`) and, failing that,
+    # the CSV-carried label. Sessions still blank after both — including
+    # genuine threshold work — disappear from every type-based view.
     #
     # ONE rule, applied only where there is no label, and shown on the page so it
     # can be audited:
     #     the session contains an 18–25 min peak-meter effort at >= 95 % of that
     #     session's OWN eFTP (not today's eFTP — the value is a rolling one and
     #     using the current number on an old ride would be anachronistic) AND that
-    #     window is >= 15 % of the ride itself. The first three conditions say the
-    #     effort was threshold work; the last one says the RIDE was built around it.
-    #     A 3-hour endurance ride with one 21-min surge inside it fails the share
-    #     test and stays unlabelled instead of being typed FTP.
+    #     window is >= 15 % of the ride itself, AND the interval detector holds
+    #     a sustained block matching the window (corroboration — a bare meter
+    #     number with no block behind it is a surge, not a session). The
+    #     conditions say the effort was threshold work AND the ride was built
+    #     around it. A 3-hour endurance ride with one 21-min surge inside it
+    #     fails the share test and stays unlabelled instead of being typed FTP.
     #
     # Nothing is overwritten silently: `training_type_raw` keeps exactly what the
     # source said and `label_source` records how each row was decided.
