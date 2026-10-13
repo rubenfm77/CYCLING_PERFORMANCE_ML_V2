@@ -70,7 +70,7 @@ base = [_row("FTP / threshold sets", 300, 4),      # 5x5 unlabelled
         _row("VO₂ max sets", 180, 5),              # 5x3 unlabelled
         _row("", 90, 3),                           # 3x90s unlabelled
         _row("BILLAT", 30, 10),                    # Billat pattern
-        _row("sprints", 12, 4),                    # short sprints
+        _row("Sprints", 12, 4),                    # short sprints
         _row("FTP / threshold sets", 300, 4, db="FTP"),  # labelled: wins
         _row("", 300, 1),                          # single: not multi-rep
         _row("long efforts", 660, 2)]              # 2x11: at/above 8 min
@@ -82,7 +82,7 @@ check("5x3 unlabelled -> VO2MAX", fam["180.0/5/"] == "VO2MAX", fam)
 check("3x90s unlabelled -> VO2MAX", fam["90.0/3/"] == "VO2MAX", fam)
 check("Billat pattern keeps its protocol name",
       fam["30.0/10/"] == "BILLAT", fam)
-check("sprints keep their name", fam["12.0/4/"] == "sprints", fam)
+check("Sprints keep their name", fam["12.0/4/"] == "Sprints", fam)
 check("the athlete's label always wins",
       fam["300.0/4/FTP"] == "FTP", fam)
 check("a single rep is not multi-rep work",

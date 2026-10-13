@@ -132,13 +132,37 @@ def render(head, ctx):
         if len(df_main) > 0:
             driver_tss = float(df_main.loc[df_main["training_type"].isin(FTP_DRIVERS), "tss"].sum())
             base_tss = float(df_main.loc[~df_main["training_type"].isin(FTP_DRIVERS), "tss"].sum())
+            # Honest denominator: unlabelled TSS is load too. Dropping it from
+            # the pie silently inflates the driver share — the exact complaint
+            # behind "impossible" percentages. It gets its own slice instead.
+            unl = df.loc[~df["training_type"].isin(MAIN_TYPES)]
+            unl_tss = float(pd.to_numeric(unl["tss"], errors="coerce").fillna(0).sum())
+            _slices = [("FTP drivers", driver_tss, C["green"]),
+                       ("Base volume", base_tss, C["muted"])]
+            if unl_tss > 0:
+                _slices.append(("Unlabelled", unl_tss, C["yellow"]))
             fig_pie = go.Figure(go.Pie(
-                labels=["FTP drivers", "Base volume"], values=[driver_tss, base_tss],
-                marker_colors=[C["green"], C["muted"]], hole=0.5,
+                labels=[s[0] for s in _slices],
+                values=[s[1] for s in _slices],
+                marker_colors=[s[2] for s in _slices], hole=0.5,
                 textinfo="label+percent"))
             style_figure(fig_pie, "TSS split — quality vs base volume",
                          H_PAIR, showlegend=False)
             show(fig_pie)
+            # Per-source audit: how much of the driver slice the athlete filed
+            # themselves vs the auto-rule. The older model had no auto-rule,
+            # so any gap between the two numbers lives here, stated plainly.
+            if "label_source" in df_main.columns:
+                _w = float(df_main.loc[df_main["training_type"].isin(FTP_DRIVERS)
+                                        & (df_main["label_source"] == "workout"),
+                                        "tss"].sum())
+                _a = float(df_main.loc[df_main["training_type"].isin(FTP_DRIVERS)
+                                        & (df_main["label_source"] == "auto-ftp"),
+                                        "tss"].sum())
+                st.caption(f"Driver TSS: **{_w:,.0f} athlete-labelled** + "
+                           f"**{_a:,.0f} auto-rule** (every auto catch is "
+                           f"listed with its numbers below). Unlabelled TSS "
+                           f"excluded from driver/base: **{unl_tss:,.0f}**.")
         else:
             callout("No labelled training types",
                     "No sessions with a MAIN_TYPES label in this period.",
@@ -449,6 +473,13 @@ def render(head, ctx):
                            f"threshold work; far above it means a hard outlier effort. "
                            f"Share of ride is the window over the whole session, and "
                            f"must clear {FTP_AUTO_SHARE:.0%} for the label to apply.")
+                _rej = int(df_all.attrs.get("auto_ftp_rejected", 0) or 0)
+                if _rej:
+                    st.caption(f"**{_rej} further session(s)** tripped the power gate "
+                               f"but the interval detector holds no sustained block "
+                               f"there — a surge inside another ride, not a threshold "
+                               f"session — so they stayed unlabelled instead of "
+                               f"becoming FTP.")
             else:
                 callout("No sessions matched", "The rule caught nothing in this dataset.",
                         C["muted"], icon="ℹ️")

@@ -149,6 +149,113 @@ def _read_cache() -> pd.DataFrame:
     return df[IV_COLUMNS]
 
 
+# ── Threshold-window corroboration ──────────────────────────────────────────
+# The peak meter reports one best window per ride; the detector segments what
+# was actually ridden. When both describe the same sustained block, the block
+# survives the join below and the window is corroborated. When the detector
+# holds rows for the ride but no block matches, the window was a surge inside
+# some other session — not a threshold session — and must not invent a label.
+CORROB_MIN_RUN_S = 720.0   # a vouching block must reach 12 min joined
+CORROB_DIP_S = 90.0        # breaks under 90 s belong to the block
+CORROB_W_TOL = 0.15        # block watts within 15 % of the window
+CORROB_LEN_TOL = 0.20      # block length within 20 % of the window
+
+
+def match_threshold_run(rows: pd.DataFrame, pm_w: float,
+                        pm_s: float) -> bool | None:
+    """Pure check: do these detector rows hold the meter's window?
+
+    WORK rows are joined across RECOVERY breaks under CORROB_DIP_S (energy-
+    weighted, so a block's watts are its own average, never a mean of
+    means). True = a joined block matches the window in length and watts.
+    False = rows exist but nothing matches. None = no rows to judge by
+    (including MISSING sentinels: the detector segmenting nothing proves
+    nothing either way — a steady effort is exactly what it misses).
+    """
+    try:
+        pw, ps = float(pm_w), float(pm_s)
+    except (TypeError, ValueError):
+        return None
+    import math as _math
+    if not (_math.isfinite(pw) and _math.isfinite(ps)) or pw <= 0 or ps <= 0:
+        return None
+    if rows is None or not len(rows):
+        return None
+    import numpy as _np
+    w = rows[rows["iv_type"].astype(str).str.upper() == "WORK"].copy()
+    if not len(w):
+        return None
+    w["secs"] = pd.to_numeric(w["secs"], errors="coerce")
+    w["avg_w"] = pd.to_numeric(w["avg_w"], errors="coerce")
+    w = w.dropna(subset=["secs", "avg_w"])
+    if not len(w):
+        return None
+    order = (pd.to_numeric(rows["seq"], errors="coerce")
+             if "seq" in rows.columns else pd.Series(np.arange(len(rows))))
+    full = rows.assign(_o=order.values).sort_values("_o", kind="stable")
+    runs, cur, dip_s, dip_e = [], None, 0.0, 0.0
+    for r in full.itertuples(index=False):
+        try:
+            s = float(getattr(r, "secs", float("nan")))
+        except (TypeError, ValueError):
+            continue
+        if not _np.isfinite(s) or s <= 0:
+            continue
+        try:
+            ww = float(getattr(r, "avg_w", float("nan")))
+        except (TypeError, ValueError):
+            ww = float("nan")
+        if not _np.isfinite(ww):
+            ww = 0.0
+        is_work = str(getattr(r, "iv_type", "")).strip().upper() == "WORK"
+        if is_work:
+            if cur is not None and dip_s > 0:
+                if dip_s < CORROB_DIP_S:
+                    cur[0] += dip_s
+                    cur[1] += dip_e
+                else:
+                    runs.append(tuple(cur))
+                    cur = None
+            dip_s, dip_e = 0.0, 0.0
+            if cur is None:
+                cur = [0.0, 0.0]
+            cur[0] += s
+            cur[1] += s * ww
+        elif cur is not None:
+            dip_s += s
+            dip_e += s * ww
+    if cur is not None:
+        runs.append(tuple(cur))
+    for rs, en in runs:
+        if rs < CORROB_MIN_RUN_S:
+            continue
+        if abs(rs - ps) <= CORROB_LEN_TOL * ps \
+                and abs(en / rs - pw) <= CORROB_W_TOL * pw:
+            return True
+    return False
+
+
+def corroborate_threshold_window(activity_id, pm_w: float,
+                                 pm_s: float) -> bool | None:
+    """Three-state corroboration of one peak-meter window against the cache.
+
+    True = a sustained detector block matches it; False = the ride has rows
+    but nothing matches (surge, not a session); None = no rows in the cache
+    (or an unreadable cache) — nothing to judge by, so the caller keeps its
+    existing behaviour instead of inventing a rejection.
+    """
+    try:
+        cache = _read_cache()
+    except Exception:
+        return None
+    if not len(cache) or "activity_id" not in cache.columns:
+        return None
+    rows = cache[cache["activity_id"].astype(str) == str(activity_id)]
+    if not len(rows):
+        return None
+    return match_threshold_run(rows, pm_w, pm_s)
+
+
 def _write_cache(df: pd.DataFrame) -> None:
     _CACHE.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(_CACHE, index=False)

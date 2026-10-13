@@ -85,7 +85,7 @@ FAMILY_ORDER = [
     "micro-reps",
     "VO₂ max sets",
     "FTP / threshold sets",
-    "sprints",
+    "Sprints",
     "long efforts",
     "single efforts",
     "unclassified sets",
@@ -101,7 +101,7 @@ FAMILY_SHORT.update({
     "micro-reps": "micro-reps",
     "VO₂ max sets": "VO₂ max",
     "FTP / threshold sets": "FTP / threshold",
-    "sprints": "sprints",
+    "Sprints": "Sprints",
     "long efforts": "long efforts",
     "single efforts": "single efforts",
     "unclassified sets": "unclassified sets",
@@ -301,12 +301,12 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
     # label — a label always wins — and retires the ambiguous heuristic
     # buckets ("FTP / threshold sets", "VO₂ max sets", "unclassified sets")
     # for 15 s–8 min multi-rep work. Two protocol patterns keep their names:
-    # sprints (under 15 s, alactic, not VO2) and the 30 s Billat/micro-rep
+    # Sprints (under 15 s, alactic, not VO2) and the 30 s Billat/micro-rep
     # patterns (a first-class discipline in this file, not generic VO2).
     _rs = pd.to_numeric(s["rep_secs"], errors="coerce")
     _blank = dbt.astype(str).str.strip().isin(BLANK_TYPE_TOKENS)
     _proto = s["family"].isin(["BILLAT", "Billat-style (30 s on / 30 s off)",
-                               "micro-reps", "sprints"])
+                               "micro-reps", "Sprints"])
     _rule_a = (_blank & (reps > 1) & _rs.ge(15.0) & _rs.lt(480.0) & ~_proto)
     s.loc[_rule_a, "family"] = "VO2MAX"
     s["dur_b"] = [dur_bucket(x) for x in

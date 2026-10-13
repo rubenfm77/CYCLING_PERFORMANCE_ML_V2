@@ -47,6 +47,31 @@ TYPE_ALIASES = {
     "RONNESTAD": "BILLAT",
 }
 
+# ── English display spellings: rare labels written in Catalan/Spanish ───────
+# Same mechanism as TYPE_ALIASES (exact match, on load, before dedup, counted
+# and disclosed) but a different mapping: these are DISTINCT workouts, not two
+# names for one thing, so nothing merges — "Llançadera." becomes "Shuttle"
+# and stays its own one-session type. "PIRAMIDAL" is the only frequent one
+# (24 sessions, a MAIN_TYPES category); it becomes "PYRAMID" and the
+# constants below follow it so no view can lose those sessions.
+TYPE_ENGLISH = {
+    "PIRAMIDAL": "PYRAMID",
+    "SPRINTS": "Sprints",
+    "Llançadera.": "Shuttle",
+    "PROGRESSIU VARIABLE": "Progressive variable",
+    "PROGRESSIU (105%)": "Progressive (105%)",
+    "PROGRESSIU (100%)": "Progressive (100%)",
+    "TEST 20' (289W)": "20-min test (289W)",
+    "Pd curve (280w)": "Power curve (280W)",
+    "Pd curve update.": "Power curve update",
+    "Pmax (Nm)": "Max power (Nm)",
+    "High cadence.": "High cadence",
+    "Protocol test sub-màxim (modificat)": "Submaximal protocol test (modified)",
+    "REC": "Recovery",
+    "FRANCE PYRINEES": "France Pyrenees",
+    "FRC INT": "FRC intervals",
+}
+
 _ALIAS_TARGETS_OK = set(TYPE_ALIASES.values()) <= set(MAIN_TYPES)
 assert _ALIAS_TARGETS_OK, (
     f"TYPE_ALIASES points at a label that is not one of MAIN_TYPES: "
@@ -113,7 +138,7 @@ STATE_GUIDE = {
     "Peak/Detrain Risk": ("⚡", "Peak form — race or start next block"),
 }
 
-FTP_DRIVERS = ["FTP", "SST", "TEMPO", "PIRAMIDAL", "VO2MAX", "BILLAT", "Q-I INTERVALS"]
+FTP_DRIVERS = ["FTP", "SST", "TEMPO", "PYRAMID", "VO2MAX", "BILLAT", "Q-I INTERVALS"]
 
 # Training-type colours come from src.config.TYPE_COLOURS (already canonical);
 # exposed here so views never hardcode hex values.
@@ -166,5 +191,5 @@ __all__ = [
     "IF_Z2_MAX", "IF_THRESHOLD", "IF_VO2", "HOT_TEMP_C",
     "H_CARD", "H_STD", "H_PAIR", "H_HERO",
     "CHART_CONFIG", "style_figure", "ZONES", "MAIN_TYPES",
-    "BLANK_TYPE_TOKENS", "TYPE_ALIASES",
+    "BLANK_TYPE_TOKENS", "TYPE_ALIASES", "TYPE_ENGLISH",
 ]

@@ -16,7 +16,7 @@ import streamlit as st
 
 from core.theme import (
     BLANK_TYPE_TOKENS, C, HOT_TEMP_C, IF_Z2_MAX, IF_THRESHOLD, TYPE_ALIASES,
-    WEIGHT_KG,
+    TYPE_ENGLISH, WEIGHT_KG,
 )
 
 # ── Threshold-effort definition — ONE definition, imported everywhere ─────────
@@ -139,7 +139,7 @@ _API_STATUS: dict = {"ok": False, "rows": 0, "newest": None, "error": None,
 
 _KNOWN_TYPES = [
     "AEROBIC BASE", "VO2MAX", "VO2 MAX", "Q-I INTERVALS", "FATMAX",
-    "PIRAMIDAL", "BILLAT", "TORQUE", "TEMPO", "END", "FTP", "SST",
+    "PYRAMID", "BILLAT", "TORQUE", "TEMPO", "END", "FTP", "SST",
 ]
 _CANDIDATE_COLS = [
     "icu_workout_name", "workout_name", "workout_doc_name",
@@ -332,6 +332,27 @@ def _apply_type_aliases(df: pd.DataFrame) -> int:
     return n
 
 
+def _apply_english_labels(df: pd.DataFrame) -> int:
+    """Rewrite rare Catalan/Spanish workout names into English, 1:1.
+
+    Same discipline as aliases (exact match, on load, before dedup, counted)
+    but nothing merges: each entry keeps its own sessions under an English
+    spelling ("Llançadera." -> "Shuttle"). "PIRAMIDAL" is the only frequent
+    one; it becomes "PYRAMID" and every constant follows it, so those 24
+    sessions cannot fall out of any type-based view.
+    """
+    if "training_type" not in df.columns or not len(df):
+        return 0
+    lab = df["training_type"].astype(object)
+    stripped = lab.astype(str).str.strip()
+    hit = stripped.isin(TYPE_ENGLISH)
+    if not hit.any():
+        return 0
+    n = int(hit.sum())
+    df.loc[hit, "training_type"] = stripped[hit].map(TYPE_ENGLISH)
+    return n
+
+
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
     base_df = None
@@ -384,6 +405,15 @@ def load_data() -> pd.DataFrame:
             f"({', '.join(f'{k} -> {v}' for k, v in sorted(TYPE_ALIASES.items()))}). "
             f"They are the same session type, so they are counted together and "
             f"can be compared across years."
+        )
+    df.attrs["labels_english"] = _englished = _apply_english_labels(df)
+    if _englished:
+        st.caption(
+            f"{_englished:,} session label(s) written in Catalan/Spanish read "
+            f"in English "
+            f"({', '.join(f'{k} -> {v}' for k, v in sorted(TYPE_ENGLISH.items()))}). "
+            f"Nothing merged: each keeps its own sessions under the English "
+            f"spelling."
         )
 
     for col in ["tss", "power_avg", "hr_avg", "duration_h", "elevation",
@@ -459,6 +489,32 @@ def load_data() -> pd.DataFrame:
 
     _pm_w, _pm_s, _ftp = _n("icu_pm_ftp_watts"), _n("icu_pm_ftp_secs"), _n("eftp")
     _auto_ftp = auto_ftp_mask(df)
+    # Corroboration: the power gate alone also catches surge rides (a hard
+    # 20-minute window inside an endurance ride the detector never segmented
+    # as sustained work). Where the interval cache holds rows for the ride,
+    # the detector gets a vote: no matching sustained block, no label. Rows
+    # absent means unknown, never a rejection — a stale cache must not delete
+    # real threshold sessions. Lazy import: interval_data imports this module
+    # for credentials, so a top-level import would cycle.
+    _auto_rejected = 0
+    try:
+        from core.interval_data import corroborate_threshold_window
+        _cand = df.index[_auto_ftp.fillna(False).astype(bool)]
+        for _i in _cand:
+            _aid = str(df.at[_i, "id"]) if "id" in df.columns else ""
+            if not _aid or _aid in ("nan", "None", ""):
+                continue
+            try:
+                _v = corroborate_threshold_window(
+                    _aid, float(_pm_w.at[_i]), float(_pm_s.at[_i]))
+            except Exception:
+                _v = None
+            if _v is False:
+                _auto_ftp.at[_i] = False
+                _auto_rejected += 1
+    except Exception:
+        pass
+    df.attrs["auto_ftp_rejected"] = int(_auto_rejected)
     df.loc[_auto_ftp, "training_type"] = "FTP"
     df.loc[_auto_ftp, "label_source"] = "auto-ftp"
     df["auto_ftp_effort_w"] = np.where(_auto_ftp, _pm_w, np.nan)

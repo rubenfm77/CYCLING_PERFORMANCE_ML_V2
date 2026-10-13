@@ -123,6 +123,9 @@ check("form reads off TSB bands",
       and WP.current_state(df.assign(tsb=0.0))["form"] == "productive")
 check("quality share counts key families only, over the last 28 days",
       abs(st["quality_share"] - 6 / 10) < 1e-9, st["quality_share"])
+check("ACWR is 7-day load over the 28-day average",
+      abs(WP.current_state(df)["acwr"] - 700.0 / (1850.0 / 4.0)) < 1e-9,
+      WP.current_state(df)["acwr"])
 
 print()
 if FAILED:

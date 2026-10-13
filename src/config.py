@@ -23,7 +23,7 @@ ZONES = {
 # ── Training types ────────────────────────────────────────────────────────────
 MAIN_TYPES = [
     "END", "AEROBIC BASE", "FTP", "FATMAX", "VO2MAX",
-    "SST", "TEMPO", "TORQUE", "Q-I INTERVALS", "BILLAT", "PIRAMIDAL",
+    "SST", "TEMPO", "TORQUE", "Q-I INTERVALS", "BILLAT", "PYRAMID",
 ]
 
 TYPE_META = {
@@ -33,6 +33,7 @@ TYPE_META = {
     "SST":           {"category": "Intensity", "primary_zone": "Z3-Z4", "ftp_driver": True},
     "TEMPO":         {"category": "Intensity", "primary_zone": "Z3", "ftp_driver": True},
     "PIRAMIDAL":     {"category": "Mixed",     "primary_zone": "Z2-Z4", "ftp_driver": True},
+    "PYRAMID":       {"category": "Mixed",     "primary_zone": "Z2-Z4", "ftp_driver": True},
     "VO2MAX":        {"category": "Intensity", "primary_zone": "Z5", "ftp_driver": True},
     "BILLAT":        {"category": "Intensity", "primary_zone": "Z5", "ftp_driver": True},
     "Q-I INTERVALS": {"category": "Mixed",     "primary_zone": "Z4-Z5", "ftp_driver": True},
@@ -75,6 +76,7 @@ TYPE_COLOURS = {
     "SST":           "#f0883e",
     "TEMPO":         "#d29922",
     "PIRAMIDAL":     "#bc8cff",
+    "PYRAMID":       "#bc8cff",
     "VO2MAX":        "#ff7b72",
     "BILLAT":        "#79c0ff",
     "FATMAX":        "#56d364",

@@ -132,6 +132,58 @@ check("the summary lists every interval with target and rest",
       f"{len(summ)} rows")
 
 print()
+print("=" * 74)
+print("5. book structures: watts beside %, purposes, totals, recovery")
+print("=" * 74)
+check("watts() renders bands and singles at FTP 240",
+      PL.watts("95-100%", 240.0) == (228, 240)
+      and PL.watts("120%", 240.0) == (288, 288), PL.watts("95-100%", 240.0))
+check("threshold band follows the book at 20 min",
+      PL.target_for("FTP", 20.0) == "95-100%"
+      and PL.target_for("SST", 12.0) == "88-94%"
+      and PL.target_for("TEMPO", 20.0) == "76-88%"
+      and PL.target_for("VO2MAX", 5.0) == "106-115%"
+      and PL.target_for("VO2MAX", 3.0) == "110-120%"
+      and PL.target_for("BILLAT", 0.5) == "120%"
+      and PL.target_for("TORQUE", 8.0) == "85-95%")
+s20 = PL.build_session("FTP", 20.0, 2, 10.0, ftp=240.0,
+                       ref=(244.0, "2026-09-30"))
+check("title carries %FTP and watts",
+      s20["title"] == "FTP 2x20m @ 95-100% (228-240W)", s20["title"])
+check("purpose and total ride along",
+      s20["purpose"] == "Sustained threshold power for climbing"
+      and s20["total_min"] == 78.0, (s20["purpose"], s20["total_min"]))
+check("warm-up opens with the book ramp and openers",
+      "- 10m ramp 50%-65% 90rpm" in s20["text"].splitlines()
+      and "- 1m 75% 100rpm" in s20["text"].splitlines())
+check("one trailing note line, never a second repeat header",
+      s20["text"].rstrip().splitlines()[-1].startswith("Targets at FTP 240W")
+      and s20["text"].count("Main Set") == 1)
+sb = PL.build_session("BILLAT", 0.5, 20, 0.5, ftp=240.0)
+check("billat flattens: no nested repeats, 5 min every 10 pairs",
+      "Main Set 20x" not in sb["text"]
+      and sb["text"].count("- 30s 120% 90rpm") == 20
+      and sb["text"].count("- 5m 50% 90rpm") == 1)
+st_ = PL.build_session("TORQUE", 8.0, 5, 5.0, ftp=240.0)
+check("low-cadence work carries its own cadence",
+      "- 8m 85-95% 55rpm" in st_["text"].splitlines())
+sr = PL.build_session("REC", 45.0, 1, None, ftp=240.0)
+check("recovery week still pastes: spin plus a note",
+      "- 45m 50% 90rpm" in sr["text"].splitlines())
+sz = PL.build_session("Z2", 120.0, 1, None, ftp=240.0)
+check("endurance block reads 56-75% with book watts",
+      "- 120m 56-75% 90rpm" in sz["text"].splitlines()
+      and "(134-180W)" in sz["title"], sz["title"])
+tab = PL.session_table([{**s20, "day": "Sat", "date": "2026-10-17"},
+                        {**sb, "day": "Wed", "date": "2026-10-14"}])
+check("the summary table lists every pasteable session",
+      len(tab) == 2 and set(tab.columns) >= {"Date", "Session", "Intervals",
+                                             "Rest", "Reference"})
+check("easy-ride duration defaults honestly with nothing to measure",
+      PL.endurance_med_duration(pd.DataFrame(
+          {"training_type": ["END"], "duration_h": [3.0]})) == 2.0)
+
+print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}): {FAILED}")
     raise SystemExit(1)

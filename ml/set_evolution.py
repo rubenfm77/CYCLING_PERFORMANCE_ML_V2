@@ -743,7 +743,7 @@ def _style(rep_secs, reps, rest, db_type=None) -> str:
     if 140 <= rep_secs < 240 and 2 <= reps <= 8:
         return "VO₂ max sets"
     if rep_secs < 15 and reps <= 6:
-        return "sprints"
+        return "Sprints"
     if rep_secs >= 600:
         return "long efforts"
     return ""

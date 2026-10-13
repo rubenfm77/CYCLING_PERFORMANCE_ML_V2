@@ -72,15 +72,15 @@ def headline(ctx) -> SimpleNamespace:
         )
     elif tsb_now < -10:
         r_color, r_title, r_body = C["orange"], "💪 Continue hard block", (
-            f"TSB = {tsb_now:.1f} — deep build. 2 quality sessions: Wednesday FTP + Saturday PIRAMIDAL."
+            f"TSB = {tsb_now:.1f} — deep build. 2 quality sessions: Wednesday FTP + Saturday PYRAMID."
         )
     elif tsb_now < 5:
         r_color, r_title, r_body = C["yellow"], "✅ Standard build week", (
-            f"TSB = {tsb_now:.1f} — build phase. Wednesday FTP/SST + Saturday PIRAMIDAL with TEMPO blocks."
+            f"TSB = {tsb_now:.1f} — build phase. Wednesday FTP/SST + Saturday PYRAMID with TEMPO blocks."
         )
     elif tsb_now < 20:
         r_color, r_title, r_body = C["green"], "🟢 Push hard this week", (
-            f"TSB = {tsb_now:.1f} — fresh. 4×10min FTP Wednesday + long PIRAMIDAL Saturday."
+            f"TSB = {tsb_now:.1f} — fresh. 4×10min FTP Wednesday + long PYRAMID Saturday."
         )
     else:
         r_color, r_title, r_body = C["purple"], "⚡ Peak form — race or FTP test", (

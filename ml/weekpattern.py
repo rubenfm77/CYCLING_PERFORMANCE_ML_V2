@@ -105,13 +105,19 @@ def current_state(df_all: pd.DataFrame) -> dict:
             "fresh" if tsb >= TSB_FRESH else
             "productive" if tsb >= TSB_OK else
             "fatigued" if tsb >= TSB_DEEP else "overreached")
+    _tss7 = float(tss[pd.to_datetime(win["date"]) >
+                      df["date"].max() - pd.Timedelta(days=7)].sum())
+    _tss28 = float(tss.sum())
+    acwr = (_tss7 / (_tss28 / 4.0)) if _tss28 > 0 else np.nan
     return {
         "date": pd.Timestamp(last["date"]).date(),
         "ctl": (float(last["ctl"]) if pd.notna(last.get("ctl")) else np.nan),
         "atl": (float(last["atl"]) if pd.notna(last.get("atl")) else np.nan),
         "tsb": tsb,
         "form": form,
-        "tss_28": float(tss.sum()),
+        "tss_28": _tss28,
+        "tss_7": _tss7,
+        "acwr": float(acwr) if np.isfinite(acwr) else np.nan,
         "sessions_28": int(len(win)),
         "quality_share": (float(q.mean()) if len(win) else np.nan),
         "main_types": types.head(3).to_dict(),

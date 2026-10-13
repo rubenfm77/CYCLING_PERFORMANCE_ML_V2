@@ -35,8 +35,16 @@ def _nominal_for(mix, family):
     return (float(r["nominal"]), int(r.get("reps_i", 1) or 1), rest)
 
 
-def _template_sessions(pat, mix, refs):
-    """Pattern row -> dated quality sessions with bins, targets, rests."""
+def _resolve_sessions(pat, mix, refs, ftp, df_all):
+    """Pattern row -> pasteable sessions. Never empty, never invented quietly.
+
+    Each pattern family resolves against the base-year mix (the athlete's own
+    nominals, reps and measured rests); a family missing from the mix falls
+    back to the book's staple for that bin, noted as book-standard. A pattern
+    with no quality sessions becomes a recovery week: a recovery spin plus
+    Z2 endurance blocks at the athlete's own easy-ride duration — still
+    pasteable, still honest about what it is.
+    """
     import numpy as np
     out, notes = [], []
     for col, fam in _FAMBIN:
@@ -44,28 +52,47 @@ def _template_sessions(pat, mix, refs):
         for _ in range(n):
             got = _nominal_for(mix, fam)
             if got is None:
-                notes.append(f"{fam}: in the pattern but not in the base "
-                             "mix — skipped, never invented")
-                continue
-            nom, reps, rest = got
-            rest_min = (rest / 60.0 if np.isfinite(rest) and rest > 0
-                        else (nom if nom <= 1.0 else
-                              (5.0 if nom < 10 else 10.0)))
-            target = PL.target_for(fam, nom)
-            title = (f"{fam} ({iw.CLS_SHORT.get(iw.rep_class(nom * 60), '?')})"
-                     f" {reps}x{PL.fmt_dur(nom)}" if reps > 1
-                     else f"{fam} ({iw.CLS_SHORT.get(iw.rep_class(nom * 60), '?')})"
-                     f" {PL.fmt_dur(nom)}")
+                if fam not in PL.BOOK_DEFAULTS:
+                    notes.append(f"{fam}: in the pattern but neither in the "
+                                 "base mix nor the book staples — skipped")
+                    continue
+                nom, reps = PL.BOOK_DEFAULTS[fam]
+                rest = PL.book_rest_for(fam, nom)
+                notes.append(f"{fam}: book-standard "
+                             f"{reps}x{PL.fmt_dur(nom)} — not in the base mix")
+            else:
+                nom, reps, rest = got
+                if not (np.isfinite(rest) and rest > 0):
+                    rest = PL.book_rest_for(fam, nom)
+                else:
+                    rest = rest / 60.0
             ref = refs.get("best", {}).get(float(nom))
-            out.append({
-                "family": fam, "nominal": nom, "reps": reps,
-                "target": target, "rest_min": round(float(rest_min), 1),
-                "title": title,
-                "reference": (f"you held {ref[0]:.0f} W for this length on "
-                              f"{ref[1]}" if ref else "no measured best yet"),
-                "text": PL.icu_text(title, nom, reps, target, rest_min),
-            })
+            out.append(PL.build_session(
+                fam, nom, reps, rest, ftp=ftp,
+                ref=(ref if ref else None)))
+    if not out:
+        notes.append("recovery week: no quality sessions in this pattern — "
+                     "recovery spin plus endurance blocks instead of blanks")
+        easy_h = PL.endurance_med_duration(df_all)
+        out.append(PL.build_session(
+            "REC", 45.0, 1, None, ftp=ftp))
+        for _ in range(2):
+            out.append(PL.build_session(
+                "Z2", easy_h * 60.0, 1, None, ftp=ftp))
     return out, notes
+
+
+def _staple_sessions(refs, ftp):
+    """Book staples for a climber when nothing else exists to learn from."""
+    out = []
+    for fam, nom, reps in [("FTP", 20.0, 2), ("VO2MAX", 5.0, 5),
+                           ("SST", 12.0, 3)]:
+        ref = refs.get("best", {}).get(float(nom))
+        out.append(PL.build_session(
+            fam, nom, reps, PL.book_rest_for(fam, nom), ftp=ftp,
+            ref=(ref if ref else None)))
+    return out, ["book staples for a climber (threshold + VO2 + sweet spot) "
+                 "— no pattern or mix to learn them from"]
 
 
 def render(head, ctx):
@@ -105,14 +132,18 @@ def render(head, ctx):
         metric_card("Main types",
                     ", ".join(stt["main_types"]) if stt["main_types"] else "—",
                     "28-day sessions by label", accent=C["muted"])
+    import numpy as _np0
+    _acwr0 = stt.get("acwr", float("nan"))
+    _acwr0_txt = (f"{_acwr0:.2f}" if _np0.isfinite(_acwr0) else "—")
     st.caption(
         "Form reading off TSB bands (fresh ≥ +10, productive −10…+10, "
         "fatigued −30…−10, overreached < −30) — a conventional reading, not "
         "a diagnosis. eFTP is only carried from 2025 on, so long-horizon "
         "outcomes below use the CTL model, which is a model of load, not "
-        "fitness itself."
+        "fitness itself. "
+        f"ACWR (7-day vs 28-day load): {_acwr0_txt} "
+        f"— cap 1.2 post-surgery, 1.3 otherwise."
     )
-
     # ── 2. WHAT SIMILAR WEEKS WERE FOLLOWED BY ────────────────────────────
     section("🔁 What weeks like this were followed by")
     S, tag, crit = WP.find_similar(W, stt["month"], stt["ctl"], stt["tsb"])
@@ -170,9 +201,10 @@ def render(head, ctx):
 
     pats = (ranked.head(3).to_dict("records") if len(ranked)
             else (R.head(3).to_dict("records") if len(R) else []))
+    ftp_set = float(refs.get("ftp", 240.0)) if isinstance(refs, dict) else 240.0
     templates = []
     for i, p in enumerate(pats, 1):
-        sess, notes = _template_sessions(p, mix, refs)
+        sess, notes = _resolve_sessions(p, mix, refs, ftp_set, df_all)
         templates.append({
             "rank": i,
             "ranked": bool(p.get("ranked", False)),
@@ -185,21 +217,20 @@ def render(head, ctx):
             "mix": {fam: int(p.get(col, 0) or 0) for col, fam in _FAMBIN},
             "sessions": sess, "notes": notes,
         })
-    if not templates and mix is not None and len(mix):
-        sess, notes = _template_sessions(
-            {"ftp_n": 2, "vo2_n": 1, "billat_n": 0, "sst_n": 0, "tempo_n": 0},
-            mix, refs)
+    if not templates:
+        sess, notes = _staple_sessions(refs, ftp_set)
         _bt = WP.base_week_tss(df_all, base_year) if base_year else (
             float("nan"),) * 3
         templates.append({"rank": 1, "ranked": False, "n": 0,
                           "tss": (_bt[1], _bt[2]),
                           "rest_days": 2, "d_ctl": (float("nan"),) * 3,
                           "d_eftp": (None, 0),
-                          "mix": {"FTP": 2, "VO2MAX": 1}, "sessions": sess,
+                          "mix": {"FTP": 1, "VO2MAX": 1, "SST": 1},
+                          "sessions": sess,
                           "notes": notes + [
                               "no similar week to learn from — TSS range is "
                               f"the {base_year} weeks' own IQR, sessions the "
-                              "base-year mix replayed"]})
+                              "book staples"]})
     if not templates:
         callout("No template", "Neither similar weeks nor a base-year mix "
                 "exist — sync interval rows first.", C["yellow"], icon="⏸️")
@@ -235,8 +266,9 @@ def render(head, ctx):
     st.caption(
         "Library > Add workout > paste one block (keep the blank lines — "
         "intervals.icu parses the steps from them), then drag it onto the "
-        "date beside it. Targets are %FTP and follow your current FTP "
-        f"setting ({refs['ftp']:.0f} W). Recovery days are riding easy or "
+        "date beside it. Every block carries %FTP and watts at your current "
+        f"FTP setting ({ftp_set:.0f} W); steps carry %FTP only so the paste "
+        "survives your next FTP change. Recovery days are riding easy or "
         "rest — the pattern's rest-day count, not a prescription."
     )
     nxt = pd.Timestamp.now().normalize() + pd.Timedelta(
@@ -245,16 +277,35 @@ def render(head, ctx):
                                                                    "Thu",
                                                                    "Sat"]
     order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    dated = []
     for i, s in enumerate(tpl["sessions"]):
         day = wds[i % len(wds)] if wds else order[i % 7]
         date = nxt + pd.Timedelta(days=(order.index(day)
                                         - nxt.dayofweek) % 7)
-        st.markdown(f"**{date.date()} ({day}) — {s['title']}** · "
-                    f"{s['target']}"
+        dated.append({**s, "day": day, "date": date.date()})
+    for s in dated:
+        st.markdown(f"**{s['date']} ({s['day']}) — {s['title']}** · "
+                    f"{s['purpose']} · ~{s['total_min']:.0f} min total"
                     + (f" · rest {PL.fmt_dur(s['rest_min'])}"
                        if s["reps"] > 1 else ""))
         st.caption(s["reference"])
         st.code(s["text"], language="text")
+    st.markdown("**Every interval of this week, one row each:**")
+    dataframe(PL.session_table(dated), height=min(420, 60 + 34 * len(dated)))
+    import numpy as _np
+    _acwr_txt = (f"{stt.get('acwr', float('nan')):.2f}"
+                 if _np.isfinite(stt.get("acwr", float("nan"))) else "—")
+    st.caption(
+        "**Adaptation rules (book).** Missed 1 session → skip it, don't "
+        "stack; missed 3+ days → repeat last week at −10% TSS. "
+        f"TSB {stt['tsb']:+.0f}: below −25, convert the next key session to "
+        "Z2. "
+        f"ACWR {_acwr_txt} (7d vs 28d; cap 1.2 post-surgery, 1.3 otherwise): "
+        "above the cap, hold next week at the 28-day average load. Two "
+        "consecutive failed key sessions → recovery week now, calendar "
+        "aside. At 48 with a 2:1 load:recovery rhythm, every third week "
+        "should look like the recovery template above."
+    )
     st.caption(
         "**Why this template.** Its shape is the shape past weeks like this "
         "one had; its outcome line is the median of what followed those "

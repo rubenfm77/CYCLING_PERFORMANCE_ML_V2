@@ -20,28 +20,83 @@ from ml.type_comparison import BLANK_TYPE_TOKENS, dur_bucket, prep_types
 
 KEY_FAMS = ["FTP", "VO2MAX", "BILLAT", "SST", "TEMPO"]
 
-# %FTP targets per family, the physiology bands the app already uses
-# (IF_THRESHOLD/IF_VO2 live in ml.type_comparison; these are their
-# prescription twins). Absolute watts are NEVER prescribed: the block prints
-# %FTP and the athlete's own reference best beside it.
-TARGETS = {
-    "FTP": [(15, "90-95%"), (10, "93-97%"), (0, "93-97%")],
-    "SST": [(0, "85-90%")],
-    "TEMPO": [(0, "78-84%")],
-    "VO2MAX": [(0, "108-118%")],
-    "BILLAT": [(0, "120-130%")],
-    "Z2": [(0, "65-75%")],
+# ── Book session library (cycling-coach skill: workout-library.md) ──────────
+# Structures, %FTP bands and rests as the book prescribes them. Watts are
+# ALWAYS rendered beside the % (book: "always show both % FTP and absolute
+# watts"), computed at the athlete's current FTP so the paste survives FTP
+# changes through the % target. Reps-before-duration (book progression rule)
+# is how templates grow; durations themselves come from the athlete's mix.
+BOOK_TARGETS = {
+    # family: [(nominal_min_floor, target)]
+    "FTP": [(15, "95-100%"), (10, "93-97%"), (0, "93-97%")],
+    "SST": [(0, "88-94%")],
+    "TEMPO": [(0, "76-88%")],
+    "VO2MAX": [(4, "106-115%"), (0, "110-120%")],
+    "BILLAT": [(0, "120%")],
+    "TORQUE": [(0, "85-95%")],
+    "Z2": [(0, "56-75%")],
+    "REC": [(0, "50%")],
 }
-WARMUP = [("15m", "ramp 50%-75%", "90rpm")]
-COOLDOWN = [("10m", "ramp 60%-40%", "80rpm")]
+BOOK_REST_MIN = {
+    # family: rest between reps (min); FTP refines by length below
+    "FTP": 10.0, "SST": 5.0, "TEMPO": 6.0, "VO2MAX": 5.0, "BILLAT": 0.5,
+    "TORQUE": 5.0,
+}
+BOOK_BILLAT_SET_REST_MIN = 5.0   # easy spin between 10-pair blocks
+BOOK_CADENCE = {"TORQUE": "55rpm"}
+BOOK_DEFAULT_CADENCE = "90rpm"
+# Fallback (nominal min, reps) when a pattern family is absent from the base
+# mix: the book's staple for that bin, labelled as book-standard, never
+# passed off as the athlete's own riding.
+BOOK_DEFAULTS = {
+    "FTP": (20.0, 2), "VO2MAX": (5.0, 5), "BILLAT": (0.5, 20),
+    "SST": (12.0, 3), "TEMPO": (20.0, 2), "TORQUE": (8.0, 5),
+}
+BOOK_PURPOSE = {
+    "FTP": "Sustained threshold power for climbing",
+    "SST": "High effect per fatigue unit",
+    "TEMPO": "Aerobic support",
+    "VO2MAX": "Maximal aerobic power",
+    "BILLAT": "Time-efficient VO2",
+    "TORQUE": "Climbing force, seated",
+    "Z2": "Aerobic base",
+    "REC": "Recovery",
+}
+# Book-standard warm-up (15 min progressive + 3x1 min openers) and cool-down,
+# written as flat `-` steps only: custom repeat headers inside Warmup are a
+# parser risk, so the openers are spelled out instead of folded.
+BOOK_WARMUP = [("10m", "ramp 50%-65%", "90rpm"),
+               ("1m", "75%", "100rpm"), ("1m", "50%", "90rpm"),
+               ("1m", "75%", "100rpm"), ("1m", "50%", "90rpm"),
+               ("1m", "75%", "100rpm"), ("3m", "50%", "90rpm")]
+BOOK_COOLDOWN = [("10m", "ramp 60%-40%", "80rpm")]
+
+
+def watts(pct: str, ftp: float = 240.0) -> tuple:
+    """A %FTP band -> (lo, hi) absolute watts. "95-100%" -> (228, 240)."""
+    try:
+        parts = str(pct).replace("%", "").split("-")
+        lo = float(parts[0]) / 100.0 * float(ftp)
+        hi = float(parts[1]) / 100.0 * float(ftp) if len(parts) > 1 else lo
+        return (round(lo), round(hi))
+    except (TypeError, ValueError, IndexError):
+        return (None, None)
 
 
 def target_for(family: str, nominal_min: float) -> str:
-    bands = TARGETS.get(family, TARGETS["Z2"])
+    """%FTP band for one family at one nominal length (book zones)."""
+    bands = BOOK_TARGETS.get(family, BOOK_TARGETS["Z2"])
     for lo, t in bands:
         if nominal_min >= lo:
             return t
     return bands[-1][1]
+
+
+def book_rest_for(family: str, nominal_min: float) -> float:
+    """Book rest between reps (min): FTP refines by length, Billat is 30 s."""
+    if family == "FTP":
+        return 10.0 if nominal_min >= 15 else 8.0
+    return float(BOOK_REST_MIN.get(family, 5.0))
 
 
 def year_table(df_all: pd.DataFrame, P=None,
@@ -201,18 +256,153 @@ def fmt_dur(mins: float) -> str:
     return f"{mins:.0f}m"
 
 
+def _watts_suffix(target: str, ftp: float) -> str:
+    """" (228-240W)" for a band, " (288W)" for a single value, "" unparseable."""
+    lo, hi = watts(target, ftp)
+    if lo is None:
+        return ""
+    return f" ({lo}-{hi}W)" if hi != lo else f" ({lo}W)"
+
+
+def build_session(family: str, nominal_min: float, reps: int,
+                  rest_min=None, ftp: float = 240.0, ref=None) -> dict:
+    """One book-structured workout, paste-ready.
+
+    Name line carries %FTP AND watts (it is not a step, so zero parse risk);
+    steps carry %FTP + cadence only. Warm-up/cool-down are the book standard;
+    Billat 30/30 blocks are flattened (no nested repeats — the builder does
+    not support them) with an easy 5 min every 10 pairs. Returns title,
+    purpose, total minutes and the paste text. `ref` is (watts, date) of the
+    athlete's own best at this length, or None.
+    """
+    nom = float(nominal_min)
+    n = max(1, int(reps or 1))
+    target = target_for(family, nom)
+    ftp = float(ftp or 240.0)
+    if rest_min is None or not np.isfinite(float(rest_min)):
+        rest_min = book_rest_for(family, nom)
+    else:
+        rest_min = float(rest_min)
+    cad = BOOK_CADENCE.get(family, BOOK_DEFAULT_CADENCE)
+    if family == "BILLAT" and nom <= 1.0:
+        main = []
+        for i in range(n):
+            main.append(("30s", "120%", "90rpm"))
+            main.append((f"{fmt_dur(rest_min)}", "55%", "90rpm"))
+            if (i + 1) % 10 == 0 and i + 1 < n:
+                main.append(("5m", "50%", "90rpm"))
+        rep_header = None
+        work_desc = f"{n}x30s on/off"
+    elif n > 1:
+        main = [(fmt_dur(nom), target, cad),
+                (fmt_dur(rest_min), "50%", BOOK_DEFAULT_CADENCE)]
+        rep_header = f"Main Set {n}x"
+        work_desc = f"{n}x{fmt_dur(nom)}"
+    else:
+        main = [(fmt_dur(nom), target, cad)]
+        rep_header = None
+        work_desc = fmt_dur(nom)
+    base = f"{family} {work_desc}".strip()
+    title = f"{base} @ {target}{_watts_suffix(target, ftp)}"
+    lines = [title, "", "Warmup"]
+    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_WARMUP]
+    lines += [""]
+    if rep_header:
+        lines += [rep_header] + [f"- {d} {t} {c}" for d, t, c in main] + [""]
+    else:
+        lines += ["Main Set"] + [f"- {d} {t} {c}" for d, t, c in main] + [""]
+    lines += ["Cooldown"]
+    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_COOLDOWN]
+    lines += [""]
+    lines += [f"Targets at FTP {ftp:.0f}W. "
+              f"{BOOK_PURPOSE.get(family, 'Aerobic work')}."]
+    text = "\n".join(lines).strip() + "\n"
+    warm = sum(_step_min(d) for d, _, _ in BOOK_WARMUP)
+    cool = sum(_step_min(d) for d, _, _ in BOOK_COOLDOWN)
+    work = sum(_step_min(d) for d, _, _ in main)
+    if rep_header:
+        # Nx repeats the work step AND its rest; no rest after the last rep.
+        work = n * work - (float(rest_min) if rest_min else 0.0)
+    total = warm + max(work, 0.0) + cool
+    return {
+        "family": family, "nominal": nom, "reps": n, "target": target,
+        "rest_min": round(float(rest_min), 1),
+        "title": title, "purpose": BOOK_PURPOSE.get(family, "Aerobic work"),
+        "total_min": round(total, 0), "text": text,
+        "reference": (f"you held {ref[0]:.0f} W for this length on {ref[1]}"
+                      if ref else "no measured best yet"),
+    }
+
+
+def _step_min(dur: str) -> float:
+    """"20m" -> 20.0, "30s" -> 0.5. Best effort, never a crash."""
+    try:
+        s = str(dur).strip().lower()
+        if s.endswith("ms"):
+            return float(s[:-2])
+        if s.endswith("m"):
+            return float(s[:-1])
+        if s.endswith("s"):
+            return float(s[:-1]) / 60.0
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def session_table(sessions: list) -> pd.DataFrame:
+    """One row per pasteable session: date, work, rest, reference."""
+    rows = []
+    for s in sessions:
+        _d = fmt_dur(s["nominal"])
+        iv_txt = (f"{s['reps']}x{_d} @ {s['target']}"
+                  if s["reps"] > 1 and not (
+                      s["family"] == "BILLAT" and s["nominal"] <= 1.0)
+                  else (f"{s['reps']}x30s on/off @ {s['target']}"
+                        if s["family"] == "BILLAT"
+                        else f"{_d} @ {s['target']}"))
+        rows.append({"Date": str(s.get("date", "—")),
+                     "Day": s.get("day", "—"),
+                     "Session": s["title"],
+                     "Intervals": iv_txt,
+                     "Rest": (f"{fmt_dur(s['rest_min'])} easy"
+                              if s["reps"] > 1 else "—"),
+                     "Reference": s.get("reference", "")})
+    return pd.DataFrame(rows)
+
+
+def endurance_med_duration(df_all: pd.DataFrame) -> float:
+    """Median hours of the athlete's own endurance rides (END/AEROBIC BASE).
+
+    The Z2 filler blocks use this, not an invented 2 h — the file says how
+    long the athlete actually rides easy. Falls back to 2 h with nothing to
+    measure.
+    """
+    try:
+        lab = df_all["training_type"].astype(str).str.strip()
+        d = pd.to_numeric(df_all.get("duration_h"), errors="coerce")
+        m = d[lab.isin(["END", "AEROBIC BASE"])].dropna()
+        if len(m) >= 5:
+            return round(float(m.median()), 1)
+    except (TypeError, ValueError, KeyError):
+        pass
+    return 2.0
+
+
 def icu_text(title: str, nominal_min: float, reps: int, target: str,
-             rest_min=None, cadence: str = "90rpm") -> str:
+             rest_min=None, cadence: str = "90rpm",
+             ftp: float = 240.0) -> str:
     """One workout in intervals.icu's plain-text workout format.
 
     Sections separated by blank lines and the repeat count on the header
     line (`Main Set 2x`) — both are required for the builder to parse the
-    steps. Targets are %FTP so the workout follows the athlete's current
-    FTP setting wherever it is pasted; cadence rides along as a cue.
+    steps. Steps carry %FTP + cadence; the title line carries %FTP and watts
+    (never a step, so zero parse risk), plus one trailing note line. Kept as
+    the generic builder; build_session() is the book-structured path.
     """
     dur = fmt_dur(float(nominal_min))
-    lines = [title, "", "Warmup"]
-    lines += [f"- {d} {t} {c}" for d, t, c in WARMUP]
+    wline = _watts_suffix(target, ftp)
+    lines = [f"{title} @ {target}{wline}", "", "Warmup"]
+    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_WARMUP]
     lines += [""]
     if reps and int(reps) > 1:
         lines += [f"Main Set {int(reps)}x",
@@ -224,7 +414,9 @@ def icu_text(title: str, nominal_min: float, reps: int, target: str,
         lines += ["Main Set", f"- {dur} {target} {cadence}"]
         lines += [""]
     lines += ["Cooldown"]
-    lines += [f"- {d} {t} {c}" for d, t, c in COOLDOWN]
+    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_COOLDOWN]
+    lines += [""]
+    lines += [f"Targets at FTP {float(ftp):.0f}W."]
     return "\n".join(lines).strip() + "\n"
 
 
@@ -274,24 +466,23 @@ def build_plan(mix: pd.DataFrame, refs: dict, weekdays: list,
             rest_min = (rest / 60.0 if np.isfinite(rest) and rest > 0
                         else (nom if nom <= 1.0 else
                               (5.0 if nom < 10 else float(rest_fallback))))
-            target = target_for(fam, nom)
             day = seen[i % len(seen)]
             date = (pd.Timestamp(start)
                     + pd.Timedelta(days=(wk - 1) * 7
                                    + (["Mon", "Tue", "Wed", "Thu", "Fri",
                                        "Sat", "Sun"].index(day)
                                       - pd.Timestamp(start).dayofweek) % 7))
-            title = (f"{fam} {reps}x{fmt_dur(nom)}" if reps > 1
-                     else f"{fam} {fmt_dur(nom)}")
             ref = refs.get("best", {}).get(nom)
+            _s = build_session(fam, nom, reps, rest_min,
+                               ftp=refs.get("ftp", 240.0),
+                               ref=(ref if ref else None))
             sessions.append({
                 "week": wk, "phase": phase, "day": day, "date": date.date(),
-                "family": fam, "nominal": nom, "reps": reps,
-                "target": target, "rest_min": round(rest_min, 1),
-                "title": title,
-                "reference": (f"you held {ref[0]:.0f} W for this length on "
-                              f"{ref[1]}" if ref else "no measured best yet"),
-                "text": icu_text(title, nom, reps, target, rest_min),
+                "family": fam, "nominal": nom, "reps": _s["reps"],
+                "target": _s["target"], "rest_min": _s["rest_min"],
+                "title": _s["title"],
+                "reference": _s["reference"],
+                "text": _s["text"],
             })
         plan.append({"week": wk, "phase": phase, "note": note,
                      "sessions": sessions})
