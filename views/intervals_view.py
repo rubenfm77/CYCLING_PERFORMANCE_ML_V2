@@ -878,6 +878,12 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     # and a 21:00 sit in ONE option instead of three — one criterion, one
     # session list on both pages.
     dur_lab = duration_options(gf)
+    if not dur_lab:
+        callout("Nothing at review length",
+                f"{FAMILY_SHORT.get(fam, fam)} holds no set at or above its "
+                f"review floor — its rows are shorter fragments, not the "
+                f"work itself.", C["yellow"], icon="⏸️")
+        return
     dur_choice = st.selectbox("2 · Duration class — the length of ONE "
                               "interval", list(dur_lab), key="iv_type_dur")
     cls = dur_lab[dur_choice]
