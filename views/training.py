@@ -389,13 +389,23 @@ def render(head, ctx):
         _n_auto = int(_src.get("auto-ftp", 0))
         _n_lab = int(_src.get("workout", 0))
         _n_unl = int(_src.get("unlabelled", 0))
-        st.caption(
-            f"Types come from two places: **{_n_lab:,}** sessions carry a workout name "
-            f"from intervals.icu, and **{_n_auto:,}** were labelled FTP by the rule "
-            f"below. **{_n_unl:,}** sessions are still unlabelled and appear in no "
-            f"type-based view — that is a real gap in the data, not a rounding "
-            f"error."
-        )
+        _n_bil = int(_src.get("auto-billat", 0))
+        _n_bas = int(_src.get("auto-base", 0))
+        _src_bits = [f"**{_n_lab:,}** carry a workout name from intervals.icu"]
+        if _n_auto:
+            _src_bits.append(f"**{_n_auto:,}** were labelled FTP by the rule "
+                             f"below")
+        if _n_bil:
+            _src_bits.append(f"**{_n_bil:,}** matched the Billat 30/30 row "
+                             f"pattern and were filed BILLAT")
+        if _n_bas:
+            _src_bits.append(f"**{_n_bas:,}** easy or sensor-less rides were "
+                             f"filed AEROBIC BASE")
+        st.caption("Types come from " + ", ".join(_src_bits) + ". " +
+                   (f"**{_n_unl:,}** sessions are still unlabelled and appear "
+                    f"in no type-based view — that is a real gap in the data, "
+                    f"not a rounding error." if _n_unl else
+                    "Nothing is unlabelled."))
         _de = int(df_all.attrs.get("dupe_rows_dropped", 0) or 0)
         if _de:
             st.caption(

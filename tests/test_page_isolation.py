@@ -122,13 +122,32 @@ def build_stub():
     return st
 
 
+_REAL_ST = [None]          # the real streamlit module, saved once
+_STUB_INSTALLED = [False]  # save the original BEFORE the first stub only
+
+
 def run_case(label, break_module=None, exc=None):
     for k in SINK:
         SINK[k].clear()
     for m in list(sys.modules):
-        if m == "app_modern" or m.startswith("views.") or m.startswith("ml."):
+        # core.* too: those modules bind `import streamlit as st` at import
+        # time, so in a combined run an earlier test leaves them pointing at
+        # the REAL streamlit — and render_sidebar's st.error then runs real
+        # streamlit machinery instead of this test's sink, crashing the page
+        # import with a TypeError that has nothing to do with isolation.
+        # Re-imported here they bind the stub, exactly as in a fresh process.
+        # The bare package names too ("views", "ml", "core"): a package
+        # object keeps its old submodule attributes, so `from views import
+        # plan` later would hand back the stub-bound module without
+        # re-importing anything.
+        if (m in ("app_modern", "views", "ml", "core")
+                or m.startswith("views.") or m.startswith("ml.")
+                or m.startswith("core.")):
             del sys.modules[m]
 
+    if not _STUB_INSTALLED[0]:
+        _REAL_ST[0] = sys.modules.get("streamlit")   # save the real one once
+        _STUB_INSTALLED[0] = True
     sys.modules["streamlit"] = build_stub()
     import importlib
     real = importlib.import_module
@@ -259,6 +278,24 @@ run_case("D", "trends", ImportError("cannot import name 'x'"))
 # Belt and braces: the secret from case C must not be anywhere in the transcript.
 if any(SECRET in s for v in SINK.values() for s in v):
     FAILS.append("a withheld exception message leaked into the UI sink")
+
+# Leave the process as this test found it. Every module bound to the stub
+# streamlit during the cases above (and the stub itself) must not leak into
+# the tests that run AFTER this one in a combined run: a later test that
+# does `import streamlit as st` would get the fake, and its page renders
+# would then run against fake widgets and fail for reasons that have
+# nothing to do with its own assertions. The ORIGINAL streamlit module is
+# restored by identity — re-importing streamlit is not an option, its
+# runtime singletons refuse a second instance.
+for _m in list(sys.modules):
+    if (_m in ("app_modern", "views", "ml", "core")
+            or _m.startswith("views.") or _m.startswith("ml.")
+            or _m.startswith("core.")):
+        del sys.modules[_m]
+if _REAL_ST[0] is not None:
+    sys.modules["streamlit"] = _REAL_ST[0]
+else:
+    sys.modules.pop("streamlit", None)
 
 print()
 print("=" * 74)

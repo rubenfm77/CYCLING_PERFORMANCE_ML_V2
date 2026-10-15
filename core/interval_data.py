@@ -354,6 +354,148 @@ def _norm_missing(activity_id, date) -> dict:
     return row
 
 
+# ── True mean-maximal power curve (intervals.icu endpoint) ─────────────────
+# The file's own interval rows can only bound MMP from below (fragments read
+# low, and summary text misses the historic peaks), so the chart that needs
+# TRUE bests — the old dashboard's 5 s / 1 / 5 / 10 / 20 / 30 / 60 min curve —
+# reads them from intervals.icu itself: GET athlete/{id}/power-curves, same
+# endpoint and parsing discipline as the older pipeline. Standard durations
+# only; a target with no effort near it is skipped, never interpolated.
+PC_WANT = {
+    5: "5s", 60: "1 min", 300: "5 min", 600: "10 min", 1200: "20 min",
+    1800: "30 min", 3600: "60 min",
+}
+# The Oct 2024–Dec 2025 power meter over-read. The MMP endpoint returns
+# aggregate bests without per-effort dates, so affected efforts cannot be
+# corrected selectively; the 365-day fetch overlaps that window heavily and
+# inflated bests would always win a best-of ranking, so the whole curve is
+# scaled by the older pipeline's measured factor, stated wherever it plots.
+POWER_CORRECTION = 0.855
+_POWER_CSV = Path(__file__).resolve().parent.parent / "data" / "power_curve.csv"
+
+
+def _parse_power_curves(data, weight_kg: float = 57.0) -> pd.DataFrame:
+    """Power-curves payload -> {secs, duration, watts, wkg} at PC_WANT.
+
+    Handles the shapes intervals.icu has returned: {"list": [...]}, a bare
+    list, or a single curve dict; per curve, secs/seconds/x against
+    values/watts/y/power. Picks the curve with the most coverage; nearest
+    available duration within 10 % (at least 2 s). Empty frame when nothing
+    parses — the chart hides instead of crashing.
+    """
+    cols = ["secs", "duration", "watts", "wkg"]
+    if not data:
+        return pd.DataFrame(columns=cols)
+    if isinstance(data, dict) and isinstance(data.get("list"), list):
+        curves = data["list"]
+    elif isinstance(data, list):
+        curves = data
+    else:
+        curves = [data]
+
+    def _extract(curve):
+        if not isinstance(curve, dict):
+            return None
+        secs = curve.get("secs") or curve.get("seconds") or curve.get("x")
+        vals = (curve.get("values") or curve.get("watts")
+                or curve.get("y") or curve.get("power"))
+        if not secs or not vals or len(secs) != len(vals):
+            return None
+        try:
+            lookup = dict(zip([float(s) for s in secs],
+                              [float(v) for v in vals]))
+        except (TypeError, ValueError):
+            return None
+        rows = []
+        for sec, label in PC_WANT.items():
+            best = None
+            for s in lookup:
+                if abs(s - sec) <= max(2.0, sec * 0.10):
+                    if best is None or abs(s - sec) < abs(best - sec):
+                        best = s
+            w = lookup.get(best) if best is not None else None
+            if w is not None and w > 0:
+                rows.append({"secs": sec, "duration": label,
+                             "watts": float(w),
+                             "wkg": float(w) / float(weight_kg or 57.0)})
+        return rows or None
+
+    best_rows = []
+    for c in curves:
+        r = _extract(c)
+        if r and len(r) > len(best_rows):
+            best_rows = r
+    if not best_rows:
+        return pd.DataFrame(columns=cols)
+    pc = pd.DataFrame(best_rows).sort_values("secs").reset_index(drop=True)
+    pc["watts"] = (pc["watts"] * POWER_CORRECTION).round(1)
+    pc["wkg"] = (pc["watts"] / float(weight_kg or 57.0)).round(4)
+    return pc[cols]
+
+
+def fetch_power_curve(days_back: int = 365) -> pd.DataFrame:
+    """True MMP curve from intervals.icu; empty frame on any failure."""
+    cols = ["secs", "duration", "watts", "wkg"]
+    try:
+        athlete_id, key = _get_api_credentials()
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    if not athlete_id or not key:
+        return pd.DataFrame(columns=cols)
+    from datetime import datetime, timedelta
+    date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    data = None
+    with requests.Session() as sess:
+        for params in (
+            {"curves": "all", "type": "Ride", "newest": date_to,
+             "oldest": date_from},
+            {"type": "Ride", "newest": date_to, "oldest": date_from},
+            {"type": "Ride"},
+        ):
+            try:
+                r = sess.get(f"{_BASE}/athlete/{athlete_id}/power-curves",
+                             auth=HTTPBasicAuth("API_KEY", key),
+                             params=params, timeout=30)
+                r.raise_for_status()
+                if r.json():
+                    data = r.json()
+                    break
+            except Exception:
+                data = None
+    if not data:
+        return pd.DataFrame(columns=cols)
+    try:
+        from core.theme import WEIGHT_KG as _W
+    except Exception:
+        _W = 57.0
+    return _parse_power_curves(data, float(_W))
+
+
+def maybe_refresh_power_curve(max_age_days: int = 7) -> dict:
+    """Rewrite data/power_curve.csv when missing or older than a week.
+
+    Called from the Intervals page (it owns sync); fail-soft by design —
+    the Fitness chart falls back to the computed curve, so a failed fetch
+    must never break a page. Returns what happened for the caller to ignore.
+    """
+    import time as _time
+    try:
+        if _POWER_CSV.exists() and (
+                _time.time() - _POWER_CSV.stat().st_mtime
+                < max_age_days * 86400):
+            return {"ok": True, "cached": True}
+        pc = fetch_power_curve()
+        if not len(pc):
+            return {"ok": False, "cached": _POWER_CSV.exists()}
+        pc["fetched"] = pd.Timestamp.now().normalize().strftime("%Y-%m-%d")
+        _POWER_CSV.parent.mkdir(parents=True, exist_ok=True)
+        pc.to_csv(_POWER_CSV, index=False)
+        return {"ok": True, "cached": False, "points": int(len(pc))}
+    except Exception as e:                                       # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}"}
+
+
 def read_intervals(cutoff_iso: str) -> pd.DataFrame:
     """Cached interval rows inside the window (MISSING sentinels dropped)."""
     cache = _read_cache()

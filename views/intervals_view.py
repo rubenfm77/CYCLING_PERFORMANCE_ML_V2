@@ -16,7 +16,8 @@ import streamlit as st
 
 from core.components import (callout, dataframe, legend, metric_card,
                              page_header, section, show)
-from core.interval_data import (fetch_acts, fetch_profile, read_intervals,
+from core.interval_data import (fetch_acts, fetch_profile,
+                                maybe_refresh_power_curve, read_intervals,
                                 sync_intervals)
 from core.theme import C, H_HERO, H_PAIR, H_STD, SURGERY, style_figure
 from ml.composition_intervals import run_composition
@@ -913,6 +914,16 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                    f"sessions (sprint starts, {_nh} set(s) here) are not "
                    f"{fam_name} work and are not drawn. Nothing else is "
                    f"hidden.")
+    _ns = int(pv.get("n_spanned", 0) or 0)
+    if _ns:
+        st.caption(
+            f"{_ns} peak-meter set(s) were not drawn here: their best-window "
+            f"reading spans two or more REPEATED sustained intervals of the "
+            f"same session (each within 20 % of the next) and is more than "
+            f"10 % longer than the longest of them — a summary across the "
+            f"intervals rather than an interval anyone rode. The detector's "
+            f"own intervals are drawn instead. Counted, not silently "
+            f"dropped.")
     slope, ci = tr.get("slope_robust", np.nan), tr.get("ci", np.nan)
     clear = (not np.isnan(ci)) and abs(slope) > ci and abs(slope) >= 1.0
     n_sets = int(pd.to_numeric(sess["sets"], errors="coerce")
@@ -1751,6 +1762,10 @@ def render(head, ctx):
 
             meta = sync_intervals(sync_iso, on_progress=_p)
             bar.empty()
+            try:
+                maybe_refresh_power_curve()
+            except Exception:
+                pass              # chart falls back to the computed curve
         acts = fetch_acts(range_iso)
         iv_full = read_intervals(sync_iso)
         iv = iv_full[iv_full["date"] >= pd.Timestamp(range_iso)].reset_index(

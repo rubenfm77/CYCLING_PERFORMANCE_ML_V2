@@ -135,22 +135,30 @@ def _cells_datable(cells: pd.DataFrame, years, label_col: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
-    """The DATE x-axis figure: one point per day, one line per rep length class.
+# One colour per PHYSIOLOGY band on the Fitness time chart (not per rep
+# class — this chart bands by physiology, so two lines, fixed colours).
+PHYS_COLORS = {"FTP": C["red"], "VO2MAX": C["orange"]}
+PHYS_LABELS = {"FTP": "FTP · 10 min and up",
+               "VO2MAX": "VO2MAX · 90 s–10 min"}
 
-    Drawn for the Fitness page from the identical data the Interval watts page
-    used to draw — same colours, same n-hovers, same dotted average, x-axis
-    type "date". There is no effort filter to apply here: the rep length class
-    already IS the split, and no class crosses ten minutes, so a long effort
-    and a short one are never on one line.
+
+def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
+    """The DATE x-axis figure: one point per day, one line per physiology.
+
+    Drawn for the Fitness page — same n-hovers, same dotted average, x-axis
+    type "date". Long efforts and short efforts never share a line (FTP is
+    ten minutes and up, VO2MAX ninety seconds to ten), and sub-90-second
+    work is not drawn here at all: a 500 W sprint line would flatten every
+    threshold line into the floor.
     """
     fig_t = go.Figure()
     for cls in sorted(daily["cls"].unique()):
         dcls = daily[daily["cls"] == cls]
         fig_t.add_trace(go.Scatter(
-            x=dcls["date"], y=dcls["med_w"], mode="lines+markers", name=cls,
-            line=dict(color=_rep_color(cls), width=2),
-            marker=dict(color=_rep_color(cls), size=9,
+            x=dcls["date"], y=dcls["med_w"], mode="lines+markers",
+            name=PHYS_LABELS.get(cls, cls),
+            line=dict(color=PHYS_COLORS.get(cls, C["accent"]), width=2),
+            marker=dict(color=PHYS_COLORS.get(cls, C["accent"]), size=9,
                         line=dict(color=C["panel"], width=1)),
             customdata=[[iw.fmt_watts(w), f"n = {int(n):,}",
                          fmt_min(r)]
@@ -171,7 +179,8 @@ def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
     style_figure(
         fig_t,
         f"{tt} — interval watts over time, {yr}"
-        f"<br><sup>x-axis is the date. One line per rep length class, n on every "
+        f"<br><sup>x-axis is the date. One line per physiology (FTP: 10 min "
+        f"and up; VO2MAX: 90 s–10 min), n on every "
         f"point; the dotted line is the average of the charted points. Observed "
         f"history, not a cause.</sup>",
         H_STD)
@@ -192,22 +201,23 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
 
     Two of them, both asked for by name: the DATE x-axis "Measured interval
     watts over time" chart, and the power-duration law. Same data (full history
-    from df_all, not the sidebar range), same rules as the Interval watts page:
-    one training type at a time, one line per rep length class, and the law
-    fitted on every effort of the type in every year.
+    from df_all, not the sidebar range): one training type at a time, one
+    line per physiology (FTP: ten minutes and up; VO2MAX: ninety seconds to
+    ten minutes), sub-90-second work excluded with its count stated, and the
+    law fitted on every effort of the type in every year.
 
     The time chart reads the SAME rows Evolution charts — the peak-power
     meter's held windows with whole efforts rebuilt from the detector's
     fragments where the detector cut them (`iv`, the interval cache) — so a
-    class shows the same days on both pages instead of the Fitness line going
-    quiet where Evolution draws bars (FTP × 20-30 min had 3 points here
-    against 7+ days there, and no 30+ line at all). Without the cache it falls
+    band shows the same days on both pages instead of the Fitness line going
+    quiet where Evolution draws bars. Without the cache it falls
     back to the per-activity summary text, and says so.
 
     No FTP / VO2MAX effort filter: it said nothing the training type does not
-    already say, and the class under every line already separates the two
-    physiologies — the classes stop and start at ten minutes, so a 5-minute
-    effort and a 15-minute one are never one number.
+    already say, and the band under every line already separates the two
+    physiologies — the bands stop and start at ten minutes and at ninety
+    seconds, so a 5-minute effort and a 15-minute one are never one number,
+    and a 30-second sprint never shares a line with either.
     """
     M = iw.measured(df_all)
     if not len(M):
@@ -220,10 +230,10 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
     types = sorted(str(t) for t in M["tt"].dropna().unique())
 
     # Two controls, not three. The FTP / VO2MAX effort filter that used to sit
-    # here said nothing the training type does not already say, and every rep
-    # length class on the chart stops and starts at ten minutes (5-10 min is
-    # the last class below it, 10-20 min the first one above), so long and
-    # short efforts are already on separate lines with separate numbers.
+    # here said nothing the training type does not already say, and every
+    # physiology band on the chart stops and starts at ten minutes and ninety
+    # seconds (FTP at ten and up, VO2MAX between), so long and short efforts
+    # are already on separate lines with separate numbers.
     c1, c2 = st.columns([2, 1])
     with c1:
         tt = st.selectbox(
@@ -250,30 +260,50 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
             _eff = iw.effort_best(df_all, iv)
         except Exception:                            # noqa: BLE001
             _eff = None
-    daily, src_note = pd.DataFrame(), ""
+    daily, src_note, n_short = pd.DataFrame(), "", 0
     if _eff is not None and len(_eff):
         _e = _eff[(_eff["tt"] == tt)
                   & (pd.to_numeric(_eff["year"],
-                                   errors="coerce") == yr)]
+                                   errors="coerce") == yr)].copy()
         if len(_e):
-            daily = (_e.groupby(["cls", "day"], as_index=False)
-                     .agg(med_w=("w", "median"), n=("w", "size"),
-                          rep_secs=("secs", "median"))
-                     .rename(columns={"day": "date"})
-                     .sort_values("date").reset_index(drop=True))
-            src_note = ("the peak-power meter's held windows, with whole "
-                        "efforts rebuilt from the detector's fragments where "
-                        "it cut them — the same rows Evolution charts, so a "
-                        "class shows the same days on both pages")
+            # Physiology bands, not rep classes: long efforts and short
+            # efforts share no line. FTP is ten minutes and up, VO2MAX is
+            # ninety seconds to ten minutes, and anything shorter (Billat
+            # 30 s work, sprint starts) stays off this chart — its watts
+            # would flatten every other line into the floor. Counted below.
+            _secs = pd.to_numeric(_e["secs"], errors="coerce")
+            _e = _e.assign(_phys=np.where(_secs >= 600.0, "FTP", np.where(
+                _secs >= 90.0, "VO2MAX", "short")))
+            n_short = int((_e["_phys"] == "short").sum())
+            _e = _e[_e["_phys"] != "short"]
+            if len(_e):
+                daily = (_e.groupby(["_phys", "day"], as_index=False)
+                         .agg(med_w=("w", "median"), n=("w", "size"),
+                              rep_secs=("secs", "median"))
+                         .rename(columns={"day": "date", "_phys": "cls"})
+                         .sort_values("date").reset_index(drop=True))
+                src_note = ("the peak-power meter's held windows, with whole "
+                            "efforts rebuilt from the detector's fragments where "
+                            "it cut them — the same rows Evolution charts, "
+                            "banded by physiology so long and short work never "
+                            "share a line")
     if not len(daily):
         if len(M_tt):
-            daily = (M_tt.groupby(["cls", "date"], as_index=False)
-                     .agg(med_w=("w", "median"), n=("w", "size"),
-                          rep_secs=("secs", "median")))
-            daily = daily.sort_values("date")
-            src_note = ("the per-activity summary text (no meter window and "
-                        "no interval rows for these sessions, so the rebuilt "
-                        "efforts cannot be drawn here)")
+            _m = M_tt.copy()
+            _secs = pd.to_numeric(_m["secs"], errors="coerce")
+            _m = _m.assign(_phys=np.where(_secs >= 600.0, "FTP", np.where(
+                _secs >= 90.0, "VO2MAX", "short")))
+            n_short = int((_m["_phys"] == "short").sum())
+            _m = _m[_m["_phys"] != "short"]
+            if len(_m):
+                daily = (_m.groupby(["_phys", "date"], as_index=False)
+                         .agg(med_w=("w", "median"), n=("w", "size"),
+                              rep_secs=("secs", "median")))
+                daily = daily.rename(columns={"_phys": "cls"})
+                daily = daily.sort_values("date")
+                src_note = ("the per-activity summary text (no meter window and "
+                            "no interval rows for these sessions, so the rebuilt "
+                            "efforts cannot be drawn here)")
     if not len(daily):
         callout("Nothing for this type", f"**{tt}** has no detected "
                 f"effort in {yr}.", C["orange"], "\U0001F6A7")
@@ -282,18 +312,21 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
 
     st.caption(
         f"**Charted efforts of {tt}, {yr}: one point per day, x-axis is the "
-        "date.** One series per rep length class; two classes never share a "
-        "number. The dotted line is the average of the charted points. "
+        "date.** One series per physiology — FTP (10 min and up) and VO2MAX "
+        "(90 s–10 min); two bands never share a number, and sub-90-second "
+        "work is excluded here so sprint watts cannot flatten the lines. "
+        "The dotted line is the average of the charted points. "
         f"Source: {src_note}."
     )
     show(_time_figure(daily, tt, yr))
     _n_dates = int(pd.to_datetime(daily["date"]).dt.normalize().nunique())
     st.caption(
         f"{_n_dates:,} date(s), {int(daily['n'].sum()):,} effort(s) in "
-        f"{len(daily):,} day-class points. "
-        "Every point carries its n in the hover; the class under each line is "
-        "printed in the legend, so a 15-minute line is never read as a "
-        "3-minute one."
+        f"{len(daily):,} day-band points"
+        + (f", {int(n_short):,} sub-90-second effort(s) excluded from this "
+           f"chart" if n_short else "")
+        + ". Every point carries its n in the hover; the band under each "
+          "line is printed in the legend."
     )
 
     _law_section(M_all, tt, int(len(M_tt)), None)

@@ -248,6 +248,51 @@ PEAK_NEAR_S = 120.0    # a detected set within 2 min IS this effort
 PEAK_SRC = "peak meter (intervals.icu)"
 DETECTED_SRC = "detected interval"
 
+# When a peak-meter window is a SUMMARY ACROSS efforts rather than an effort.
+# A 3x20 session's meter reports its single best window — about 24 minutes,
+# the work plus the recoveries — and that window draws as one bar in
+# "20-30 min" while the three real intervals sit in "10-20 min", which reads
+# as the intervals having jumped class. Two conditions, both needed:
+# the session holds AT LEAST TWO sustained detector efforts of about the
+# SAME length (within 20 % — repeats of one prescription, not a ride's
+# haphazard segmentation), and the meter window is more than 10 % LONGER
+# than the longest of them. A meter window shorter than, or near, the
+# longest effort is that effort's own reading and is kept — e.g. a 20:00
+# best window over a ride whose detector also cut a 28-minute block.
+SPAN_REPEAT_TOL = 0.20   # repeats: two sustained efforts within 20 % length
+SPAN_MARGIN = 1.10       # window must be > 10 % longer than the longest
+
+
+def is_spanned(meter_s, det_secs) -> bool:
+    """True when a peak-meter window spans repeated efforts instead of one.
+
+    `meter_s` is the window's length in seconds; `det_secs` is every
+    sustained (>= PEAK_MIN_S) detector effort of the SAME session. Short
+    inputs are safe: fewer than two sustained efforts is never a span.
+    """
+    try:
+        m = float(meter_s)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(m):
+        return False
+    vals = []
+    # `det_secs` may be a pandas Series — never test it with `or`, whose
+    # bool() on a Series raises.
+    for v in ([] if det_secs is None else det_secs):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(f) and f >= PEAK_MIN_S:
+            vals.append(f)
+    if len(vals) < 2:
+        return False
+    vals.sort()
+    if vals[-1] > vals[-2] * (1.0 + SPAN_REPEAT_TOL):
+        return False          # the efforts are not repeats of one prescription
+    return m > vals[-1] * SPAN_MARGIN
+
 
 def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
                       min_s: float = PEAK_MIN_S,

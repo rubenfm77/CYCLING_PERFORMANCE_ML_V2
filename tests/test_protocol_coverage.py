@@ -193,6 +193,53 @@ got3 = sorted(pd.to_datetime(pv3["sessions"]["date"]).dt.strftime("%Y-%m-%d"))
 assert got3 == ["2026-09-15", "2026-09-22"], got3
 print("   PASS  a meter-only series draws its bars instead of nothing")
 
+# ── the spanned meter: a window across repeated efforts is not drawn ───────
+# act A rode 3 x 20:06 (three similar sustained detector efforts). The peak
+# meter's single best window is 24:00 — work plus recoveries — a summary
+# across the repeats, not a fourth interval. It must not be drawn (it would
+# sit in "20-30 min" while the real intervals are in "10-20 min"), and the
+# drop must be COUNTED. A window near the longest effort, by contrast, is
+# that effort's own reading and keeps drawing.
+span_sets = _sets([
+    {"activity_id": "A", "date": "2026-04-17", "_key": "g1", "reps": 3,
+     "rep_secs": 1206.0, "set_w": 212.666667, "intensity": 90.666667,
+     "Source": DETECTED_SRC, "name": "3x20"},
+    {"activity_id": "A", "date": "2026-04-17", "_key": "peak:A:1440s",
+     "reps": 1, "rep_secs": 1440.0, "set_w": 214.0, "intensity": np.nan,
+     "Source": PEAK_SRC, "name": "3x20"},
+])
+pv4 = run_protocol_view(iv, span_sets, "FTP", 20.0)
+assert pv4["ok"], pv4.get("reason")
+assert pv4.get("n_spanned") == 1, f"the spanned window: {pv4.get('n_spanned')}"
+assert pv4["n_sessions"] == 1 and pv4["n_reps"] == 3, pv4
+assert len(pv4["bars"]) == 3, "the three real intervals, not the window"
+near_sets = span_sets.copy()
+near_sets.loc[near_sets["Source"] == PEAK_SRC, "rep_secs"] = 1240.0
+pv5 = run_protocol_view(iv, near_sets, "FTP", 20.0)
+assert pv5["ok"] and pv5.get("n_spanned") == 0, (
+    "a window near the longest effort is that effort's own reading")
+print("   PASS  a meter window across repeated efforts is dropped and counted")
+print("   PASS  a window near the longest effort still draws")
+
+# dissimilar detector blocks (a ride cut haphazardly) are NOT repeats, so a
+# longer meter window there is kept — that is how AEROBIC BASE 40-min rides
+# keep their readings.
+dissim_iv = _iv([
+    {"activity_id": "E", "date": "2026-04-05", "group_id": "b1",
+     "secs": 724, "avg_w": 200.0},
+    {"activity_id": "E", "date": "2026-04-05", "group_id": "b2",
+     "secs": 946, "avg_w": 198.0},
+])
+dissim_sets = _sets([
+    {"activity_id": "E", "date": "2026-04-05", "_key": "peak:E:2520s",
+     "reps": 1, "rep_secs": 2520.0, "set_w": 218.0, "intensity": np.nan,
+     "Source": PEAK_SRC, "name": "long z2"},
+])
+dissim_sets["family"] = "AEROBIC BASE"
+pv6 = run_protocol_view(dissim_iv, dissim_sets, "AEROBIC BASE", 20.0)
+assert pv6["ok"] and pv6.get("n_spanned") == 0, (
+    "haphazard segmentation is not a set of repeats")
+
 print()
 print("=" * 74)
 print("2. on this athlete's own cache")
@@ -206,7 +253,8 @@ else:
     from core.data import load_data
     from core.interval_data import read_intervals
     from ml.set_evolution import (add_signatures, build_sets,
-                                  fill_peak_efforts)
+                                  fill_peak_efforts, is_spanned,
+                                  PEAK_MIN_S, PEAK_SRC)
     from ml.type_comparison import dur_class_label, prep_types
 
     iv = read_intervals("2025-01-01T00:00:00")
@@ -215,6 +263,32 @@ else:
     s, _ = add_signatures(sets)
     s = prep_types(s)
     s = s.assign(lab=[dur_class_label(b) for b in s["dur_b"]])
+
+    # The same span verdict the view applies (a meter window across REPEATED
+    # sustained efforts is not an interval): expectations below must drop
+    # those sets too, or every legitimately spanned set would look lost.
+    det_vals = {}
+    _d = s[(s["Source"] == DETECTED_SRC)
+           & (pd.to_numeric(s["rep_secs"], errors="coerce") >= PEAK_MIN_S)]
+    if len(_d):
+        for _a, _gg in _d.groupby(_d["activity_id"].astype(str)):
+            _vals = []
+            for _r in _gg.itertuples(index=False):
+                _nr = int(_r.reps) if (pd.notna(getattr(_r, "reps", np.nan))
+                                       and _r.reps >= 1) else 1
+                _vals += [float(_r.rep_secs)] * _nr
+            det_vals[_a] = _vals
+
+    def _spanned_sets(frame):
+        if not len(frame) or "Source" not in frame.columns:
+            return frame.iloc[0:0]
+        _solo = (frame["Source"] == PEAK_SRC) & (
+            pd.to_numeric(frame.get("reps"), errors="coerce") == 1)
+        _sub = frame[_solo]
+        out = [i for i, rs, aid in zip(_sub.index, _sub["rep_secs"],
+                                       _sub["activity_id"].astype(str))
+               if is_spanned(rs, det_vals.get(aid))]
+        return frame.loc[out]
 
     bad = dropped_days = dup = inv = unknown_src = floored = 0
     for (fam, lab), g in s.groupby(["family", "lab"]):
@@ -226,15 +300,21 @@ else:
                 keep = sub[_rs.fillna(float("inf")) >= float(_fl)]
             else:
                 keep = sub
+            keep = keep.drop(index=_spanned_sets(keep).index)
             pv = run_protocol_view(iv, s, fam, float(db))
             if not pv["ok"]:
-                # The only acceptable refusal is the family protocol floor:
-                # every set below it, all of them counted, none half-drawn.
-                assert fam in FAMILY_FLOOR_S, \
+                # Two acceptable refusals, both all-or-nothing and counted:
+                # the family protocol floor hid every set below it, or every
+                # set was a peak-meter window SPANNING repeated efforts (a
+                # 24-min best window over 2 x 12-min blocks is no 25-min
+                # effort — nothing of that length was ever ridden).
+                _hid = int(pv.get("n_hidden_sets", 0) or 0)
+                _spn = int(pv.get("n_spanned", 0) or 0)
+                assert fam in FAMILY_FLOOR_S or _spn, \
                     f"{fam} {lab} dur_b={db} refused without a floor"
-                assert pv.get("n_hidden_sets", 0) == len(sub), \
-                    (f"{fam} {lab} dur_b={db}: hidden "
-                     f"{pv.get('n_hidden_sets')} of {len(sub)} sets")
+                assert _hid + _spn == len(sub), \
+                    (f"{fam} {lab} dur_b={db}: hidden {_hid} + spanned "
+                     f"{_spn} of {len(sub)} sets")
                 floored += 1
                 continue
             want = pd.to_datetime(keep["date"]).dt.normalize().nunique()
@@ -278,6 +358,7 @@ else:
     # the reported case: the 20-minute FTP sessions Evolution shows
     g = s[(s["family"] == "FTP") & (s["lab"] == "20 min")]
     if len(g):
+        g = g.drop(index=_spanned_sets(g).index)
         db = float(g["dur_b"].iloc[0])
         pv = run_protocol_view(iv, s, "FTP", db)
         assert pv["ok"] and pv["n_sessions"] == \

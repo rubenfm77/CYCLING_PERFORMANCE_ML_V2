@@ -214,6 +214,7 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     df = pd.json_normalize(data)
     rename_map = {
         "start_date_local": "date", "moving_time": "duration_secs",
+        "type": "activity_type",
         "distance": "distance_m", "total_elevation_gain": "elevation",
         "average_watts": "power_avg", "weighted_average_watts": "power_np",
         "max_watts": "power_max", "average_heartrate": "hr_avg",
@@ -560,6 +561,56 @@ def load_data() -> pd.DataFrame:
     df["auto_ftp_effort_w"] = np.where(_auto_ftp, _pm_w, np.nan)
     df["auto_ftp_effort_s"] = np.where(_auto_ftp, _pm_s, np.nan)
     df["auto_ftp_threshold_w"] = np.where(_auto_ftp, FTP_AUTO_FRAC * _ftp, np.nan)
+
+    # ── Athlete-confirmed fallbacks: BILLAT and AEROBIC BASE ──────────────
+    # Sessions still blank after every label channel (workout name,
+    # Description, CSV carry, auto-FTP) are not left unlabelled where their
+    # content says what they are — the athlete confirmed the unlabelled
+    # remainder is Billat or aerobic base:
+    #   * BILLAT: the interval cache holds >= 8 short (20-45 s) WORK rows —
+    #     a 30/30 session leaves exactly that signature; anything less is
+    #     sprint noise inside another workout, not a Billat session;
+    #   * AEROBIC BASE: a cycling ride ridden easy (IF below 0.75), or with
+    #     no intensity data at all (no power, no IF — the sensor-less spins).
+    # Walks and non-cycling activities are never touched. Sources recorded
+    # per row and counted below like every other source.
+    _is_ride = (df["activity_type"].astype(str).str.strip() == "Ride"
+                if "activity_type" in df.columns
+                else pd.Series(True, index=df.index))
+    _still_blank = (~_has_label) & (~_auto_ftp.fillna(False).astype(bool))
+    _n_billat = _n_base = 0
+    try:
+        from core.interval_data import _read_cache as _rcache
+        _cache = _rcache()
+        _brows = pd.DataFrame()
+        if len(_cache) and "activity_id" in _cache.columns:
+            _cw = _cache[_cache["iv_type"].astype(str).str.upper() == "WORK"]
+            _cs = pd.to_numeric(_cw["secs"], errors="coerce")
+            _brows = _cw[( _cs >= 20.0) & (_cs <= 45.0)]
+        _billat_ids = (set(_brows.groupby(
+            _brows["activity_id"].astype(str)).size()
+            .loc[lambda s: s >= 8].index) if len(_brows) else set())
+    except Exception:
+        _billat_ids = set()
+    if _billat_ids and "id" in df.columns:
+        _m_billat = (_still_blank & _is_ride & df["id"].astype(str).isin(
+            _billat_ids))
+        df.loc[_m_billat, "training_type"] = "BILLAT"
+        df.loc[_m_billat, "label_source"] = "auto-billat"
+        _n_billat = int(_m_billat.sum())
+        _still_blank = _still_blank & ~_m_billat
+    _if = pd.to_numeric(df.get("if_score"), errors="coerce")
+    _nopower = (pd.to_numeric(df.get("power_np"),
+                              errors="coerce").isna()
+                & pd.to_numeric(df.get("power_avg"),
+                                errors="coerce").isna())
+    _m_base = (_still_blank & _is_ride
+               & ((_if < IF_Z2_MAX) | (_if.isna() & _nopower)))
+    df.loc[_m_base, "training_type"] = "AEROBIC BASE"
+    df.loc[_m_base, "label_source"] = "auto-base"
+    _n_base = int(_m_base.sum())
+    df.attrs["auto_billat_n"] = int(_n_billat)
+    df.attrs["auto_base_n"] = int(_n_base)
 
     # VO2max estimate (ACSM leg-cycling: 10.8 × W/kg + 7) from Critical Power.
     if "vo2max_power" not in df.columns and "icu_pm_cp" in df.columns:

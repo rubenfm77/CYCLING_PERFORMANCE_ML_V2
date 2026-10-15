@@ -1204,6 +1204,18 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
                              "cls": rep_class(_rs), "w": float(_rw),
                              "source": DETECTED_EFFORT_SRC, "pieces": ""})
                 drew = drew or (rep_class(_rs) == meter_cls)
+            # A window that SPANS repeated efforts is a summary across them,
+            # not an interval: a 24-minute best window over a 3x20 session
+            # would draw as one bar in "20-30 min" while the three real
+            # efforts sit in "10-20 min", which reads as the intervals having
+            # jumped class. Same verdict the protocol detail applies
+            # (ml.set_evolution.is_spanned), so both pages agree; a window
+            # near or below the longest effort is that effort's own reading
+            # and still draws when no detector row shares its class.
+            # Lazy import: ml.set_evolution imports this module, so a
+            # top-level import here would cycle.
+            from ml.set_evolution import is_spanned
+            drew = drew or is_spanned(float(s.at[i]), det["secs"])
         if drew:
             continue
         rows.append({**base,

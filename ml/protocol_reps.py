@@ -386,6 +386,57 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
         if not len(sel):
             return {"ok": False, "reason": "No sets in that series.",
                     "n_hidden_sets": n_hidden_sets}
+    # A meter window SPANNING repeated sustained efforts is a summary across
+    # them, not an interval anyone rode: a 24-minute best window over a 3x20
+    # session draws as one lone bar in "20-30 min" while the three intervals
+    # sit in "10-20 min", which reads as the intervals having jumped class.
+    # Span verdict shared with the Evolution day chart (`is_spanned`): the
+    # session must hold two or more REPEATED detector efforts (within 20 %
+    # of each other) and the window must be more than 10 % longer than the
+    # longest — a window near or below the longest effort is that effort's
+    # own reading and keeps the benefit of the doubt. Counted when dropped.
+    from ml.set_evolution import PEAK_MIN_S, PEAK_SRC, is_spanned
+    n_spanned = 0
+    if ("Source" in sel.columns and "Source" in sets.columns
+            and "activity_id" in sets.columns):
+        _solo_m = (sel["Source"] == PEAK_SRC) & (
+            pd.to_numeric(sel.get("reps"), errors="coerce") == 1)
+        if bool(_solo_m.any()):
+            _rs_all = pd.to_numeric(sets["rep_secs"], errors="coerce")
+            _det = sets[(sets["Source"] == DETECTED_SRC)
+                        & (_rs_all >= PEAK_MIN_S)]
+            # One set row IS the repeats: a 3x20 arrives as one row with
+            # reps=3, so its length is expanded by the rep count before the
+            # span verdict — otherwise repeats could never be seen here.
+            _by_act = {}
+            if len(_det):
+                for _a, _g in _det.groupby(_det["activity_id"].astype(str)):
+                    _vals = []
+                    for _r in _g.itertuples(index=False):
+                        try:
+                            _rs = float(_r.rep_secs)
+                        except (TypeError, ValueError):
+                            continue
+                        _nr = pd.to_numeric(getattr(_r, "reps", 1),
+                                            errors="coerce")
+                        _nr = (int(_nr) if np.isfinite(_nr) and _nr >= 1
+                               else 1)
+                        _vals += [_rs] * _nr
+                    _by_act[_a] = _vals
+            _keep_i = []
+            for _i in sel.index[_solo_m]:
+                _aid = str(sel.at[_i, "activity_id"])
+                if is_spanned(sel.at[_i, "rep_secs"], _by_act.get(_aid)):
+                    continue                    # a summary across repeats
+                _keep_i.append(_i)
+            n_spanned = int(len(sel.index[_solo_m]) - len(_keep_i))
+            if n_spanned:
+                _rest = sel.index[~_solo_m].tolist() + _keep_i
+                sel = sel.loc[sorted(_rest)]
+            if not len(sel):
+                return {"ok": False, "reason": "No sets in that series.",
+                        "n_hidden_sets": n_hidden_sets,
+                        "n_spanned": n_spanned}
 
     reps, consumed = _set_members(iv, sel)
     # A set that owns no raw member row — a peak-meter reading, whose single
@@ -503,4 +554,5 @@ def run_protocol_view(iv: pd.DataFrame, sets: pd.DataFrame, family: str,
         )
     return {"ok": True, "bars": bars, "sessions": sess, "trend": trend,
             "n_reps": int(len(bars)), "n_sessions": int(len(sess)),
-            "n_hidden_sets": int(n_hidden_sets)}
+            "n_hidden_sets": int(n_hidden_sets),
+            "n_spanned": int(n_spanned)}
