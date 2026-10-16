@@ -895,8 +895,9 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     st.caption(f"**{fam_name} at {cls}** — {art} {cls} interval is the only "
                f"thing ever compared with {art} {cls} interval. No other "
                f"training type, no other duration class, no workout-average "
-               f"substitution. Same classes as the Evolution day chart: "
-               f"every day it draws for this class is a session here too.")
+               f"substitution. Same class names as the Evolution day chart — "
+               f"which draws sustained efforts (ten minutes and up) while "
+               f"short-interval sessions are reviewed here, rep by rep.")
 
     pv = _protocol_view_cached(iv_full, gf, fam, None, cls)
     if not pv.get("ok"):

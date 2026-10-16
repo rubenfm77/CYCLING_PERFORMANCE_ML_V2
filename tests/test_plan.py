@@ -154,9 +154,12 @@ check("title carries %FTP and watts",
 check("purpose and total ride along",
       s20["purpose"] == "Sustained threshold power for climbing"
       and s20["total_min"] == 78.0, (s20["purpose"], s20["total_min"]))
-check("warm-up opens with the book ramp and openers",
-      "- 10m ramp 50%-65% 90rpm" in s20["text"].splitlines()
-      and "- 1m 75% 100rpm" in s20["text"].splitlines())
+check("warm-up opens with the book ramp and openers, in watts",
+      "- 10m ramp 120-156w 90rpm" in s20["text"].splitlines()
+      and "- 1m 180w 100rpm" in s20["text"].splitlines()
+      and not [ln for ln in s20["text"].splitlines()
+               if ln.startswith("- ") and "%" in ln],
+      [ln for ln in s20["text"].splitlines() if ln.startswith("- ")][:9])
 check("one trailing note line, never a second repeat header",
       s20["text"].rstrip().splitlines()[-1].startswith("Targets at FTP 240W")
       and s20["text"].count("Main Set") == 1)

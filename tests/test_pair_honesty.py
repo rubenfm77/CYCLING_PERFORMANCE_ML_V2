@@ -299,6 +299,26 @@ check("a lone fragment in another class draws beside the meter",
 _eb3 = effort_best(_mdf, None)
 check("without the cache nothing changes: one meter row",
       len(_eb3) == 1 and _eb3["source"].iloc[0] == PEAK_ROW_SRC)
+_mdf4 = pd.DataFrame([{"id": "m4", "date": pd.Timestamp("2026-08-21"),
+                       "training_type": "BILLAT", "icu_pm_ftp_watts": 253.0,
+                       "icu_pm_ftp_secs": 450.0}])
+_miv4 = _pv_iv([("WORK", 29, 311, "g29"), ("WORK", 31, 309, "g29"),
+                ("WORK", 30, 312, "g29")], act="m4")
+_eb4 = effort_best(_mdf4, _miv4)
+check("a sub-10-min meter window over short-only reps is not filed as an "
+      "interval",
+      len(_eb4) == 0, _eb4[["secs", "cls", "source"]].to_dict("records")
+      if len(_eb4) else "no rows")
+_mdf5 = pd.DataFrame([{"id": "m5", "date": pd.Timestamp("2026-08-21"),
+                       "training_type": "BILLAT", "icu_pm_ftp_watts": 253.0,
+                       "icu_pm_ftp_secs": 450.0}])
+_miv5 = _pv_iv([("WORK", 29, 311, "g29"), ("WORK", 700, 240, "g700")],
+               act="m5")
+_eb5 = effort_best(_mdf5, _miv5)
+check("one sustained detector row keeps the window beside it",
+      len(_eb5) == 2
+      and sorted(_eb5["cls"]) == ["10-20 min", "5-10 min"],
+      _eb5[["secs", "cls"]].to_dict("records") if len(_eb5) else "no rows")
 
 print()
 if FAILED:

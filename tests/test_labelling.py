@@ -125,8 +125,9 @@ check("the unlabelled slice is real load, not a rounding error",
       shares["unlabelled"] > 1.0, shares)
 w = float(tss[drv & (df["label_source"] == "workout")].sum())
 a = float(tss[drv & (df["label_source"] == "auto-ftp")].sum())
+b = float(tss[drv & (df["label_source"] == "auto-billat")].sum())
 check("driver TSS splits by source and the parts sum to the slice",
-      abs((w + a) - float(tss[drv].sum())) < 1e-6, (w, a))
+      abs((w + a + b) - float(tss[drv].sum())) < 1e-6, (w, a, b))
 
 print()
 if FAILED:

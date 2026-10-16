@@ -4,9 +4,9 @@
 # holds. The base year is scored in the open (labelled sessions, prescribed
 # structure, measured efforts), the session mix is counted out of that year —
 # prescribed comments where they exist, measured sets where they do not (2026
-# has no coach comments left) — the watts come from the athlete's own bests
-# expressed as %FTP (intervals.icu expands those off the athlete's current
-# FTP setting), and the rests are the medians the athlete actually rode.
+# has no coach comments left) — the watts are absolute, computed at the
+# athlete's current FTP so every pasted step reads in watts, and the rests
+# are the medians the athlete actually rode.
 # The 12-week shape is a plain 4 + 4 + 3 + 1 progression laid over those
 # sessions, stated as such — it is not copied from any year, because no year
 # in this file holds a full progression to copy.
@@ -264,16 +264,34 @@ def _watts_suffix(target: str, ftp: float) -> str:
     return f" ({lo}-{hi}W)" if hi != lo else f" ({lo}W)"
 
 
+def _paste_step(dur: str, target: str, cadence: str, ftp: float) -> str:
+    """One flat step in absolute watts: `- 10m ramp 120-156w 90rpm`.
+
+    The book warm-up/cool-down tables are written as %FTP bands ("ramp
+    50%-65%", "75%"); the paste carries the same band converted at the
+    athlete's current FTP, because this page prescribes watts, not
+    percentages. An unparseable target passes through untouched rather
+    than vanishing.
+    """
+    t = str(target)
+    prefix, band = ("ramp ", t[len("ramp "):]) if t.startswith("ramp ") else ("", t)
+    lo, hi = watts(band, ftp)
+    if lo is None:
+        return f"- {dur} {t} {cadence}"
+    wtxt = f"{lo}-{hi}w" if hi != lo else f"{lo}w"
+    return f"- {dur} {prefix}{wtxt} {cadence}"
+
+
 def build_session(family: str, nominal_min: float, reps: int,
                   rest_min=None, ftp: float = 240.0, ref=None) -> dict:
     """One book-structured workout, paste-ready.
 
     Name line carries %FTP AND watts (it is not a step, so zero parse risk);
-    steps carry %FTP + cadence only. Warm-up/cool-down are the book standard;
-    Billat 30/30 blocks are flattened (no nested repeats — the builder does
-    not support them) with an easy 5 min every 10 pairs. Returns title,
-    purpose, total minutes and the paste text. `ref` is (watts, date) of the
-    athlete's own best at this length, or None.
+    every step carries absolute watts + cadence. Warm-up/cool-down are the
+    book standard; Billat 30/30 blocks are flattened (no nested repeats —
+    the builder does not support them) with an easy 5 min every 10 pairs.
+    Returns title, purpose, total minutes and the paste text. `ref` is
+    (watts, date) of the athlete's own best at this length, or None.
     """
     nom = float(nominal_min)
     n = max(1, int(reps or 1))
@@ -316,14 +334,14 @@ def build_session(family: str, nominal_min: float, reps: int,
     base = f"{family} {work_desc}".strip()
     title = f"{base} @ {target}{_watts_suffix(target, ftp)}"
     lines = [title, "", "Warmup"]
-    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_WARMUP]
+    lines += [_paste_step(d, t, c, ftp) for d, t, c in BOOK_WARMUP]
     lines += [""]
     if rep_header:
         lines += [rep_header] + [f"- {d} {t} {c}" for d, t, c in main] + [""]
     else:
         lines += ["Main Set"] + [f"- {d} {t} {c}" for d, t, c in main] + [""]
     lines += ["Cooldown"]
-    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_COOLDOWN]
+    lines += [_paste_step(d, t, c, ftp) for d, t, c in BOOK_COOLDOWN]
     lines += [""]
     lines += [f"Targets at FTP {ftp:.0f}W. "
               f"{BOOK_PURPOSE.get(family, 'Aerobic work')}."]
@@ -406,9 +424,10 @@ def icu_text(title: str, nominal_min: float, reps: int, target: str,
 
     Sections separated by blank lines and the repeat count on the header
     line (`Main Set 2x`) — both are required for the builder to parse the
-    steps. Steps carry %FTP + cadence; the title line carries %FTP and watts
-    (never a step, so zero parse risk), plus one trailing note line. Kept as
-    the generic builder; build_session() is the book-structured path.
+    steps. Every step carries absolute watts + cadence; the title line
+    carries %FTP and watts (never a step, so zero parse risk), plus one
+    trailing note line. Kept as the generic builder; build_session() is
+    the book-structured path.
     """
     dur = fmt_dur(float(nominal_min))
     wline = _watts_suffix(target, ftp)
@@ -419,7 +438,7 @@ def icu_text(title: str, nominal_min: float, reps: int, target: str,
     _rtxt = (f"{_rlo}-{_rhi}w" if _rhi != _rlo else f"{_rlo}w") \
         if _rlo is not None else "50%"
     lines = [f"{title} @ {target}{wline}", "", "Warmup"]
-    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_WARMUP]
+    lines += [_paste_step(d, t, c, ftp) for d, t, c in BOOK_WARMUP]
     lines += [""]
     if reps and int(reps) > 1:
         lines += [f"Main Set {int(reps)}x",
@@ -431,7 +450,7 @@ def icu_text(title: str, nominal_min: float, reps: int, target: str,
         lines += ["Main Set", f"- {dur} {_wtxt} {cadence}"]
         lines += [""]
     lines += ["Cooldown"]
-    lines += [f"- {d} {t} {c}" for d, t, c in BOOK_COOLDOWN]
+    lines += [_paste_step(d, t, c, ftp) for d, t, c in BOOK_COOLDOWN]
     lines += [""]
     lines += [f"Targets at FTP {float(ftp):.0f}W."]
     return "\n".join(lines).strip() + "\n"

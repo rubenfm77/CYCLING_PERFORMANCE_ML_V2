@@ -159,8 +159,12 @@ def render(head, ctx):
                 _a = float(df_main.loc[df_main["training_type"].isin(FTP_DRIVERS)
                                         & (df_main["label_source"] == "auto-ftp"),
                                         "tss"].sum())
+                _b = float(df_main.loc[df_main["training_type"].isin(FTP_DRIVERS)
+                                        & (df_main["label_source"] == "auto-billat"),
+                                        "tss"].sum())
                 st.caption(f"Driver TSS: **{_w:,.0f} athlete-labelled** + "
-                           f"**{_a:,.0f} auto-rule** (every auto catch is "
+                           f"**{_a:,.0f} auto-ftp** + **{_b:,.0f} auto-billat** "
+                           f"(every auto catch is "
                            f"listed with its numbers below). Unlabelled TSS "
                            f"excluded from driver/base: **{unl_tss:,.0f}**.")
         else:
@@ -174,7 +178,9 @@ def render(head, ctx):
         "Each bar is % TSS by training type per month. Months are independent "
         "observations but the *count* is small, so treat anything below as "
         "hypothesis-generating, not confirmatory. This section always uses your "
-        "full history, ignoring the sidebar range."
+        "full history, ignoring the sidebar range. Monthly bars are % of "
+        "labelled TSS only — the pie's Unlabelled slice is excluded from "
+        "them, not hidden by them."
     )
 
     # Composition analysis deliberately uses the FULL history (df_all) rather than

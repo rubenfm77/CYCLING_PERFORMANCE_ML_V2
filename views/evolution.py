@@ -245,7 +245,11 @@ def _interval_by_day(ctx):
         "line is the average of the interval watts across the charted bars, so "
         "each day can be compared to the average of intervals themselves. One "
         "training type and one length class at a time, so two different "
-        "intervals never share a bar."
+        "intervals never share a bar. Sustained efforts only (ten minutes "
+        "and up): a meter window under ten minutes over a session of short "
+        "reps is work blended with recoveries, not an interval, so it is not "
+        "drawn here — those sessions are reviewed rep by rep in the "
+        "Intervals detail."
     )
 
     opts = iw.day_options(df, iv=iv)

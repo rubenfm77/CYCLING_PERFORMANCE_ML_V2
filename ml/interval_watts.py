@@ -1083,6 +1083,13 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
     over 8:00 is a different effort from 188 W over 26:00 and averaging the two
     would be the exact error this module exists to avoid, so `cls` is derived
     per row and callers bucket on it.
+
+    One refusal: a meter window under ten minutes over a session whose
+    detector rows are all short work (BILLAT/micro-rep patterns) is skipped
+    — it is work blended with recoveries, not an interval, and filing it in
+    an interval class would disagree with the rep-by-rep detail. Those
+    sessions live in the Intervals detail; a meter-only session (no detector
+    rows at all) still draws its window instead of nothing.
     """
     cols = ["date", "day", "src", "tt", "secs", "cls", "w", "n", "source",
             "pieces"]
@@ -1113,11 +1120,20 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
     # up: sprint starts never qualify, so this changes nothing below ten
     # minutes. `iv=None` leaves this empty and every session draws its meter.
     det_by = {}
+    short_max_by = {}
     if iv is not None and len(iv) and "activity_id" in iv.columns:
         _w = iv[iv["iv_type"].astype(str).str.upper() == "WORK"].copy()
         _w["secs"] = pd.to_numeric(_w["secs"], errors="coerce")
         _w["avg_w"] = pd.to_numeric(_w["avg_w"], errors="coerce")
         _w = _w.dropna(subset=["secs", "avg_w"])
+        # The LONGEST WORK row per activity, whatever its length. A session
+        # whose detector rows are ALL short work (BILLAT/micro-rep patterns)
+        # has no sustained effort for the day chart — see the meter-window
+        # guard below. Computed before the LONG_MIN_S cut, on purpose.
+        if len(_w):
+            short_max_by = {
+                str(a): float(g["secs"].max()) for a, g in
+                _w.groupby(_w["activity_id"].astype(str), sort=False)}
         _w = _w[_w["secs"] >= LONG_MIN_S]
         if len(_w):
             det_by = {a: g for a, g in
@@ -1216,6 +1232,21 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
             # top-level import here would cycle.
             from ml.set_evolution import is_spanned
             drew = drew or is_spanned(float(s.at[i]), det["secs"])
+        # A meter window UNDER ten minutes over a session whose detector
+        # rows are all short work is the session's best SUSTAINED window —
+        # work blended with recoveries — not an interval. Drawing it in an
+        # interval class files e.g. a 7:30 window as a "5-10 min BILLAT",
+        # which no 30 s rep ever was, and its watts disagree with the
+        # rep-by-rep detail. Those sessions are reviewed rep by rep in the
+        # Intervals detail; the day chart draws sustained efforts (ten
+        # minutes and up) and meter-only sessions, never a blend
+        # masquerading as an interval. Needs detector evidence to bite, so
+        # a meter-only session still draws its window instead of nothing.
+        _pk_s = float(s.at[i])
+        _short_max = short_max_by.get(look)
+        if (_pk_s < LONG_MIN_S and _short_max is not None
+                and _short_max < LONG_MIN_S):
+            continue
         if drew:
             continue
         rows.append({**base,
