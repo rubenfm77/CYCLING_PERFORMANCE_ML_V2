@@ -1344,6 +1344,43 @@ def _effort_by_day(df: pd.DataFrame, with_avg: bool = True,
         drop=True)
 
 
+def minute_options(S: pd.DataFrame) -> tuple:
+    """Nominal-minute choices for one (type x class) day frame.
+
+    Same dur_bucket rounding the Intervals detail filters on, so a 20:00
+    never shares a chart with a 28:00. Returns (options, nom) where options
+    is [("all", label), (20.0, label), ...] with bar/day counts per option
+    and nom is the nominal-minute series aligned to S. options holds only
+    "all" when there is no choice to make (fewer than two distinct
+    minutes); both are empty when the frame carries no usable lengths.
+    Pure function of the frame — the view only renders what it returns,
+    so the picker cannot promise bars the chart does not draw.
+    """
+    empty = ([], pd.Series(dtype=float))
+    if S is None or not len(S) or "secs" not in S.columns:
+        return empty
+    try:
+        # Lazy import: ml.type_comparison imports this module, so a
+        # top-level import here would cycle (same pattern as is_spanned).
+        from ml.type_comparison import dur_bucket
+    except Exception:
+        return empty
+    nom = pd.to_numeric(S["secs"], errors="coerce").map(
+        lambda s: float(dur_bucket(s)) if pd.notna(s) else float("nan"))
+    mins = sorted(set(float(x) for x in nom if pd.notna(x)))
+    if not mins:
+        return empty
+    opts = [("all",
+             f"All lengths — {int(len(S)):,} bar(s), "
+             f"{int(S['day'].nunique()):,} day(s)")]
+    if len(mins) > 1:
+        for m in mins:
+            sub = S[nom == m]
+            opts.append((m, f"{m:g} min — {int(len(sub)):,} bar(s), "
+                           f"{int(sub['day'].nunique()):,} day(s)"))
+    return opts, nom
+
+
 def day_series(df: pd.DataFrame, tt: str, cls: str,
                with_avg: bool = True,
                iv: pd.DataFrame | None = None) -> pd.DataFrame:

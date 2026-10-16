@@ -6,8 +6,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.components import (callout, legend, metric_card, page_header, section, show,
-                             stat_block)
+from core.components import (callout, dataframe, legend, metric_card, page_header,
+                              section, show, stat_block)
 from core.data import (FTP_AUTO_FRAC, FTP_AUTO_MAX_S, FTP_AUTO_MIN_S,
                        FTP_AUTO_SHARE)
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, FTP_DRIVERS, H_CARD, H_PAIR, H_STD,
@@ -20,6 +20,80 @@ def _num(df, col):
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index, dtype="float64")
     return pd.to_numeric(df[col], errors="coerce")
+
+
+def _unlabelled_rows(unl: pd.DataFrame) -> pd.DataFrame:
+    """One row per unlabelled session: why no rule claims it.
+
+    Mirrors the auto-rule thresholds (core.data FTP_AUTO_*), so the reason
+    is the failing condition itself, not a paraphrase: a best window under
+    18:00, over 25:00, under 95% of the ride's own eFTP, or under 15% of
+    the ride. Those rides stay unlabelled — hand-label them (SST/TEMPO by
+    IF) rather than loosening the rule, which would also mislabel the
+    surge rides the 15% share was built to refuse.
+    """
+    rows = []
+    _pm_w = _num(unl, "icu_pm_ftp_watts")
+    _pm_s = _num(unl, "icu_pm_ftp_secs")
+    _ftp = _num(unl, "eftp")
+    _dur = _num(unl, "duration_s")
+    _if = _num(unl, "if_score")
+    _tss = _num(unl, "tss").fillna(0.0)
+
+    def _fmt(s):
+        try:
+            s = float(s)
+        except (TypeError, ValueError):
+            return "—"
+        if pd.isna(s) or s <= 0:
+            return "—"
+        return f"{s:.0f} s" if s < 60 else f"{s / 60:.0f} min"
+
+    for i in unl.index:
+        w, s = _pm_w.get(i), _pm_s.get(i)
+        try:
+            w, s = float(w), float(s)
+        except (TypeError, ValueError):
+            w, s = float("nan"), float("nan")
+        ftp, dur = _ftp.get(i), _dur.get(i)
+        if pd.isna(w) or pd.isna(s) or s <= 0:
+            why = "no sustained threshold window recorded by the meter"
+            win = "—"
+        elif s < FTP_AUTO_MIN_S:
+            why = (f"best window {_fmt(s)} under the "
+                   f"{FTP_AUTO_MIN_S / 60:.0f}:00 auto-FTP floor")
+            win = f"{w:.0f} W / {_fmt(s)}"
+        elif s > FTP_AUTO_MAX_S:
+            why = (f"best window {_fmt(s)} over the "
+                   f"{FTP_AUTO_MAX_S / 60:.0f}:00 auto-FTP ceiling")
+            win = f"{w:.0f} W / {_fmt(s)}"
+        elif pd.isna(ftp) or w < FTP_AUTO_FRAC * float(ftp):
+            why = (f"{w:.0f} W under 95% of this ride's own eFTP"
+                   if pd.notna(ftp) else "no eFTP reference on this ride")
+            win = f"{w:.0f} W / {_fmt(s)}"
+        elif pd.isna(dur) or s < FTP_AUTO_SHARE * float(dur):
+            why = (f"only {s / float(dur):.0%} of the ride — under the 15% "
+                   f"share a threshold session must own")
+            win = f"{w:.0f} W / {_fmt(s)}"
+        else:
+            why = ("passes the window checks — the detector found no "
+                   "matching sustained block (threshold corroboration)")
+            win = f"{w:.0f} W / {_fmt(s)}"
+        try:
+            _d = pd.Timestamp(unl.at[i, "date"]).date().isoformat()
+        except (TypeError, ValueError, KeyError):
+            _d = "—"
+        try:
+            _ifv = float(_if.get(i))
+            _ifs = f"{_ifv:.2f}" if pd.notna(_ifv) else "—"
+        except (TypeError, ValueError):
+            _ifs = "—"
+        rows.append({"Date": _d, "TSS": round(float(_tss.get(i, 0.0))),
+                     "Duration": _fmt(dur), "IF": _ifs,
+                     "Best window": win, "Why unlabelled": why})
+    return pd.DataFrame(rows,
+                        columns=["Date", "TSS", "Duration", "IF",
+                                 "Best window", "Why unlabelled"])
 
 
 def render(head, ctx):
@@ -167,6 +241,20 @@ def render(head, ctx):
                            f"(every auto catch is "
                            f"listed with its numbers below). Unlabelled TSS "
                            f"excluded from driver/base: **{unl_tss:,.0f}**.")
+                # The unlabelled slice, accounted for ride by ride: each row
+                # names the exact auto-rule condition it fails, so "why is
+                # this unlabelled" is answered by the numbers, not by trust.
+                if len(unl):
+                    with st.expander(
+                            f"Why {len(unl):,} session(s) stay unlabelled"):
+                        st.caption(
+                            "One row per unlabelled session in this period. "
+                            "The reason is the failing auto-rule condition "
+                            "itself — window outside 18–25 min, under 95% of "
+                            "the ride's own eFTP, under the 15% share, or no "
+                            "sustained window at all. Billat-pattern reps are "
+                            "counted in the Intervals detail, not here.")
+                        dataframe(_unlabelled_rows(unl), height=300)
         else:
             callout("No labelled training types",
                     "No sessions with a MAIN_TYPES label in this period.",

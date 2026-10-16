@@ -429,6 +429,22 @@ def load_data() -> pd.DataFrame:
         )
         st.stop()
 
+    # Interval rows for the auto-Billat rule cannot wait for a visit to the
+    # Intervals page: after any restart or redeploy the runtime cache is
+    # empty, and every recent Billat session would sit unlabelled — and out
+    # of the Intervals detail — until somebody opened that page first. So
+    # the data load itself pulls rows for window activities missing from
+    # the cache: append-only, new ids only, silent best-effort. No
+    # credentials or no network changes nothing (the pages behave exactly
+    # as before); a failed sync never breaks the load.
+    try:
+        from core.interval_data import sync_intervals as _sync_iv
+        _iv_cut = (datetime.now() - timedelta(days=60)).strftime(
+            "%Y-%m-%dT00:00:00")
+        _sync_iv(_iv_cut)
+    except Exception:
+        pass
+
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     df.attrs["labels_carried"] = _carried_labels

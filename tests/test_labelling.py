@@ -130,6 +130,49 @@ check("driver TSS splits by source and the parts sum to the slice",
       abs((w + a + b) - float(tss[drv].sum())) < 1e-6, (w, a, b))
 
 print()
+print("=" * 74)
+print("4. every unlabelled session names its failing condition")
+print("=" * 74)
+from views.training import _unlabelled_rows  # noqa: E402
+_synth = pd.DataFrame([
+    # no window at all
+    {"date": "2026-10-01", "tss": 60, "duration_s": 3600, "if_score": 0.70,
+     "eftp": 234, "icu_pm_ftp_watts": np.nan, "icu_pm_ftp_secs": np.nan},
+    # best window under the 18:00 floor
+    {"date": "2026-10-02", "tss": 150, "duration_s": 8589, "if_score": 0.81,
+     "eftp": 225, "icu_pm_ftp_watts": 247, "icu_pm_ftp_secs": 720},
+    # best window over the 25:00 ceiling
+    {"date": "2026-10-03", "tss": 141, "duration_s": 6816, "if_score": 0.86,
+     "eftp": 225, "icu_pm_ftp_watts": 220, "icu_pm_ftp_secs": 1860},
+    # under 95% of the ride's own eFTP
+    {"date": "2026-10-04", "tss": 158, "duration_s": 8238, "if_score": 0.79,
+     "eftp": 225, "icu_pm_ftp_watts": 207, "icu_pm_ftp_secs": 1200},
+    # under the 15% share
+    {"date": "2026-10-05", "tss": 140, "duration_s": 10053, "if_score": 0.71,
+     "eftp": 221, "icu_pm_ftp_watts": 215, "icu_pm_ftp_secs": 1380},
+    # passes every window check (corroboration's call, not the table's)
+    {"date": "2026-10-06", "tss": 134, "duration_s": 5400, "if_score": 0.84,
+     "eftp": 234, "icu_pm_ftp_watts": 228, "icu_pm_ftp_secs": 1300},
+])
+_ur = _unlabelled_rows(_synth)
+check("one row per session, newest last",
+      list(_ur["Date"]) == [f"2026-10-0{d}" for d in range(1, 7)],
+      list(_ur["Date"]))
+_whys = list(_ur["Why unlabelled"])
+check("no window recorded",
+      "no sustained threshold window" in _whys[0], _whys[0])
+check("under the 18:00 floor",
+      "under the 18:00" in _whys[1], _whys[1])
+check("over the 25:00 ceiling",
+      "over the 25:00" in _whys[2], _whys[2])
+check("under 95% of own eFTP",
+      "under 95%" in _whys[3], _whys[3])
+check("under the 15% share",
+      "under the 15% share" in _whys[4], _whys[4])
+check("window checks pass: corroboration owns the refusal",
+      "corroboration" in _whys[5], _whys[5])
+
+print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}): {FAILED}")
     raise SystemExit(1)

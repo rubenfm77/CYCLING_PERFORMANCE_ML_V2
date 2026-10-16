@@ -301,9 +301,35 @@ def _interval_by_day(ctx):
                     C["orange"], "⚠️")
             return
 
-    S = iw.day_series(df, tt, cls, iv=iv)
-    if S is None or not len(S):
+    S_all = iw.day_series(df, tt, cls, iv=iv)
+    if S_all is None or not len(S_all):
         callout("Nothing to chart", f"No {tt} day carries a {cls} interval.",
+                C["orange"], "⚠️")
+        return
+
+    # Nominal-minute selector — the same rounding the Intervals detail
+    # filters on, so a 20:00 never shares a chart with a 28:00 here either.
+    # Options and counts come from iw.minute_options (pure function of the
+    # frame); everything below reads the filtered frame, so the picker
+    # cannot promise bars the chart does not draw. One minute only: no
+    # choice, no widget.
+    _min_opts, _noms = iw.minute_options(S_all)
+    S_all = S_all.assign(_nom=_noms)
+    S = S_all
+    if len(_min_opts) > 1:
+        _m_vals = [v for v, _ in _min_opts]
+        _m_lab = dict(_min_opts)
+        _m_choice = st.selectbox(
+            "Nominal minutes", _m_vals, index=0,
+            format_func=lambda m: _m_lab[m], key="evo_day_min",
+            help="Same minute rounding as the Intervals detail. A 20:00 and "
+                 "a 28:00 are different efforts and are never averaged "
+                 "together; narrow here to follow one exact length.")
+        if _m_choice != "all":
+            S = S_all[S_all["_nom"] == float(_m_choice)].copy()
+    if S is None or not len(S):
+        callout("Nothing to chart",
+                f"No {tt} day carries a {cls} interval at that length.",
                 C["orange"], "⚠️")
         return
 

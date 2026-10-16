@@ -27,8 +27,8 @@ from core.theme import BLANK_TYPE_TOKENS  # noqa: E402
 from ml.interval_watts import (  # noqa: E402
     BEST_S_COL, BEST_W_COL, MIN_CELL_N, REP_ORDER, audit, coverage_note,
     day_options, day_series, effort_best, fmt_rep, fmt_watts, main_set, measured,
-    measured_cells, parse_measured, parse_prescribed, prescribed, prescribed_cells,
-    prescribed_evolution, prescribed_yoy, rep_class,
+    measured_cells, minute_options, parse_measured, parse_prescribed, prescribed,
+    prescribed_cells, prescribed_evolution, prescribed_yoy, rep_class,
 )
 
 FAILS = []
@@ -437,6 +437,35 @@ for name, fn in (
     except Exception as e:                                # noqa: BLE001
         print(f"  FAIL  {name}: {type(e).__name__}: {e}")
         FAILS.append(name)
+
+print()
+print("=" * 72)
+print("10. nominal-minute options: same rounding as the detail")
+print("=" * 72)
+_mix = pd.DataFrame({
+    "day": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03",
+                           "2026-01-04", "2026-01-05"]),
+    "secs": [1200, 1207, 1500, 1700, 1702],
+    "w": [220, 222, 218, 226, 224],
+})
+_opts, _nom = minute_options(_mix)
+check("a 20:07 sits with the 20:00, never averaged with a 28:00",
+      [v for v, _ in _opts] == ["all", 20.0, 25.0, 30.0],
+      [v for v, _ in _opts])
+check("each option counts its own bars and days",
+      _opts[1][1].startswith("20 min — 2 bar(s)")
+      and _opts[3][1].startswith("30 min — 2 bar(s)"),
+      [l for _, l in _opts])
+check("filtering to one minute keeps only its bars",
+      sorted(_mix[_nom == 20.0]["w"]) == [220, 222])
+_one = pd.DataFrame({"day": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+                     "secs": [1200, 1205], "w": [220, 221]})
+_o1, _ = minute_options(_one)
+check("one minute only: no choice, no widget",
+      [v for v, _ in _o1] == ["all"], _o1)
+_oe, _ne = minute_options(pd.DataFrame())
+check("empty frame: no options, nothing to filter",
+      _oe == [] and not len(_ne))
 
 print()
 print("=" * 72)

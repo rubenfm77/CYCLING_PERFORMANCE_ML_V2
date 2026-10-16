@@ -136,10 +136,13 @@ def _cells_datable(cells: pd.DataFrame, years, label_col: str) -> pd.DataFrame:
 
 
 # One colour per PHYSIOLOGY band on the Fitness time chart (not per rep
-# class — this chart bands by physiology, so two lines, fixed colours).
-PHYS_COLORS = {"FTP": C["red"], "VO2MAX": C["orange"]}
+# class — this chart bands by physiology, so two lines, fixed colours), plus
+# the BILLAT rep line: Billat work is sub-90-second reps by definition, so
+# it gets its own per-day line instead of sharing a sustained band.
+PHYS_COLORS = {"FTP": C["red"], "VO2MAX": C["orange"], "reps": C["purple"]}
 PHYS_LABELS = {"FTP": "FTP · 10 min and up",
-               "VO2MAX": "VO2MAX · 90 s–10 min"}
+               "VO2MAX": "VO2MAX · 90 s–10 min",
+               "reps": "BILLAT reps · under 90 s (per-day median)"}
 
 
 def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
@@ -180,7 +183,9 @@ def _time_figure(daily: pd.DataFrame, tt: str, yr) -> go.Figure:
         fig_t,
         f"{tt} — interval watts over time, {yr}"
         f"<br><sup>x-axis is the date. One line per physiology (FTP: 10 min "
-        f"and up; VO2MAX: 90 s–10 min), n on every "
+        f"and up; VO2MAX: 90 s–10 min)"
+        f"{'; BILLAT reps: per-day median' if 'reps' in set(daily['cls']) else ''}"
+        f", n on every "
         f"point; the dotted line is the average of the charted points. Observed "
         f"history, not a cause.</sup>",
         H_STD)
@@ -204,7 +209,9 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
     from df_all, not the sidebar range): one training type at a time, one
     line per physiology (FTP: ten minutes and up; VO2MAX: ninety seconds to
     ten minutes), sub-90-second work excluded with its count stated, and the
-    law fitted on every effort of the type in every year.
+    law fitted on every effort of the type in every year. The one exception
+    is BILLAT: its work IS sub-90-second reps by definition, so it gets its
+    own per-day rep line (n = reps) instead of an empty sustained chart.
 
     The time chart reads the SAME rows Evolution charts — the peak-power
     meter's held windows with whole efforts rebuilt from the detector's
@@ -304,18 +311,67 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
                 src_note = ("the per-activity summary text (no meter window and "
                             "no interval rows for these sessions, so the rebuilt "
                             "efforts cannot be drawn here)")
+    # BILLAT's work is sub-90-second reps by definition, so the sustained
+    # bands above can never show its training. For THIS family only, the
+    # per-day median of its short WORK rows from the interval cache is its
+    # own line — the trend the Intervals detail's session averages also
+    # show. (The summary-text field only carries fragments here, never the
+    # rep block, so it cannot source this line.) Every other type keeps
+    # the exclusion: its short rows are starts and sprints, not work.
+    if (tt == "BILLAT" and iv is not None and len(iv)
+            and "activity_id" in iv.columns and "id" in df_all.columns):
+        _w = iv[iv["iv_type"].astype(str).str.upper() == "WORK"].copy()
+        _w["secs"] = pd.to_numeric(_w["secs"], errors="coerce")
+        _w["avg_w"] = pd.to_numeric(_w["avg_w"], errors="coerce")
+        _w = _w.dropna(subset=["secs", "avg_w"])
+        _w = _w[_w["secs"] < 90.0]
+        if len(_w):
+            _lab = (df_all.assign(
+                _tt=df_all["training_type"].astype(str).str.strip(),
+                _yy=pd.to_datetime(df_all["date"],
+                                   errors="coerce").dt.year)
+                .set_index(df_all["id"].astype(str))[["_tt", "_yy"]])
+            # A double-synced ride sits in the file twice: first row wins
+            # for the label lookup (dedup donates the athlete's label to
+            # the survivor, so both copies agree anyway).
+            _lab = _lab[~_lab.index.duplicated(keep="first")]
+            _w = _w.assign(_aid=_w["activity_id"].astype(str))
+            _w = _w[_w["_aid"].isin(_lab.index)]
+            _w = _w[(_w["_aid"].map(_lab["_tt"]) == "BILLAT")
+                    & (pd.to_datetime(_w["date"],
+                                      errors="coerce").dt.year == yr)]
+            if len(_w):
+                _rep = (_w.assign(
+                    _day=pd.to_datetime(_w["date"],
+                                        errors="coerce").dt.normalize())
+                    .groupby("_day", as_index=False)
+                    .agg(med_w=("avg_w", "median"), n=("avg_w", "size"),
+                         rep_secs=("secs", "median"))
+                    .rename(columns={"_day": "date"}).assign(cls="reps")
+                    .sort_values("date").reset_index(drop=True))
+                daily = (pd.concat([daily, _rep], ignore_index=True)
+                         if len(daily) else _rep)
+                _rep_note = ("the per-day median of the detector's short "
+                             "work rows (n = rows; every rep is charted in "
+                             "the Intervals detail)")
+                src_note = (f"{src_note}; {_rep_note}"
+                            if src_note else _rep_note)
     if not len(daily):
         callout("Nothing for this type", f"**{tt}** has no detected "
                 f"effort in {yr}.", C["orange"], "\U0001F6A7")
         _law_section(M_all, tt, 0, None)
         return
 
+    _has_reps = bool(len(daily) and (daily["cls"] == "reps").any())
     st.caption(
         f"**Charted efforts of {tt}, {yr}: one point per day, x-axis is the "
         "date.** One series per physiology — FTP (10 min and up) and VO2MAX "
-        "(90 s–10 min); two bands never share a number, and sub-90-second "
-        "work is excluded here so sprint watts cannot flatten the lines. "
-        "The dotted line is the average of the charted points. "
+        "(90 s–10 min); two bands never share a number"
+        + ("; BILLAT's 30 s work is its own per-day rep line, because "
+           "sustained bands can never show it" if _has_reps else
+           ", and sub-90-second work is excluded here so sprint watts "
+           "cannot flatten the lines")
+        + ". The dotted line is the average of the charted points. "
         f"Source: {src_note}."
     )
     show(_time_figure(daily, tt, yr))
@@ -323,8 +379,10 @@ def fitness_section(df_all: pd.DataFrame, iv=None) -> None:
     st.caption(
         f"{_n_dates:,} date(s), {int(daily['n'].sum()):,} effort(s) in "
         f"{len(daily):,} day-band points"
-        + (f", {int(n_short):,} sub-90-second effort(s) excluded from this "
-           f"chart" if n_short else "")
+        + (f", {int(n_short):,} sub-90-second effort(s) "
+           f"charted as the per-day rep line" if _has_reps and n_short else
+           (f", {int(n_short):,} sub-90-second effort(s) excluded from this "
+            f"chart" if n_short else ""))
         + ". Every point carries its n in the hover; the band under each "
           "line is printed in the legend."
     )
