@@ -120,7 +120,22 @@ print("=" * 74)
 
 ctx = frames(df_all)
 head = headline(ctx)
-vf.render(head, ctx)
+# The Fitness page prefers data/power_curve.csv (the real mean-maximal
+# export) when one sits beside the app — but THIS check is about the
+# computed curve's own rendering, so any local export is moved aside for
+# the render and put straight back afterwards. Never deleted, never left
+# behind: a locally-synced machine and a fresh clone must see the same
+# assertion.
+from pathlib import Path as _P          # noqa: E402
+_pc_cache = _P("data/power_curve.csv")
+_pc_stash = _P("data/power_curve.csv.teststash")
+if _pc_cache.exists():
+    _pc_cache.replace(_pc_stash)
+try:
+    vf.render(head, ctx)
+finally:
+    if _pc_stash.exists():
+        _pc_stash.replace(_pc_cache)
 n_fit = len(FIGS)
 viw.render(head, ctx)                 # the Power law page
 n_law = len(FIGS)

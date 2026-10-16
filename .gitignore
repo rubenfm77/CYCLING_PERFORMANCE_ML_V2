@@ -1,6 +1,10 @@
 # cycling-performance-ml
 data/*.xlsx
 data/interval_cache.csv
+# runtime cache: intervals.icu mean-maximal power, refetched weekly by the
+# Intervals sync (ml/interval_data.maybe_refresh_power_curve). Never commit
+# a snapshot — a fresh instance must fetch today's curve, not a stale copy.
+data/power_curve.csv
 outputs/
 __pycache__/
 *.pyc

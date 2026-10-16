@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 
 from core.components import (callout, legend, metric_card,
                              page_header, section, show)
+from core.interval_data import POWER_CORRECTION, fetch_power_curve
 from core.theme import (C, FTP_CURRENT, FTP_TARGET, H_CARD, H_HERO, H_PAIR, H_STD,
                         STATE_COLORS, SURGERY, WEIGHT_KG, style_figure)
 from ml import efficiency as ef
@@ -190,9 +191,11 @@ def render(head, ctx):
     # ── Power curve & best efforts ─────────────────────────────────────────
     section("⚡ Power curve & best efforts")
     # Source order: the mean-maximal CSV if some pipeline actually produced it,
-    # otherwise the curve computed from the file itself. The CSV was never
-    # reachable on a deploy (nothing in this repo writes it), so the old code
-    # showed "run python src/intervals_api.py" — a script that does not exist.
+    # then a LIVE fetch of intervals.icu's true mean-maximal power endpoint —
+    # the same one the older dashboard used — because on a fresh instance
+    # (Streamlit Cloud wipes the folder on every restart) waiting for the
+    # Intervals page to write the CSV would leave this chart on the computed
+    # fallback forever. Credentials missing or endpoint down: fall through.
     pc_df = pd.DataFrame()
     pc_src = None
     if Path("data/power_curve.csv").exists():
@@ -200,6 +203,15 @@ def render(head, ctx):
             _csv = pd.read_csv("data/power_curve.csv")
             if {"watts", "secs", "duration"}.issubset(_csv.columns):
                 pc_df, pc_src = _csv, "csv"
+        except Exception:
+            pc_df = pd.DataFrame()
+
+    if pc_df.empty or "watts" not in pc_df.columns:
+        try:
+            _live = fetch_power_curve()
+            if len(_live) and {"watts", "secs", "duration"}.issubset(
+                    _live.columns):
+                pc_df, pc_src = _live, "live"
         except Exception:
             pc_df = pd.DataFrame()
 
@@ -223,25 +235,53 @@ def render(head, ctx):
         # length stays in `duration`, printed on every hover.
         _pc_axis = iw.axis_labels(pc_df["secs"])
         _hover_ok = {"date", "n", "duration"}.issubset(pc_df.columns)
+        # The MMP endpoint returns durations without per-point dates or
+        # counts, so when those are absent the hover still carries the
+        # EXACT duration — a reader never gets a bare x/y tooltip here.
+        _hover_dur = (not _hover_ok) and "duration" in pc_df.columns
+        # Tick words: the fetched mean-maximal frame already carries the
+        # endpoint's own canonical labels ("5s", "1 min", …) and the older
+        # chart printed those verbatim; only the computed curve needs the
+        # house axis_labels rule applied to raw seconds.
+        _pc_ticks = (pc_df["duration"].tolist()
+                     if pc_src != "file" and "duration" in pc_df.columns
+                     else _pc_axis)
         cc = st.columns(2)
         with cc[0]:
             fig_pc = go.Figure(go.Scatter(
                 x=pc_df["secs"], y=pc_df["watts"], mode="lines+markers+text",
                 line=dict(color=C["purple"], width=3),
                 marker=dict(size=10, color=C["purple"]),
-                text=[""] + [f"{w:.0f} W" for w in pc_df["watts"].iloc[1:]],
+                # Same label style as the older chart: "360W" on every point
+                # but the first — the first gets the purple corner annotation
+                # below instead.
+                text=[""] + [f"{w:.0f}W" for w in pc_df["watts"].iloc[1:]],
                 textposition=["top center" if i % 2 == 0 else "bottom center"
                               for i in range(len(pc_df))],
                 name="Best power (W)",
                 customdata=(pc_df[["duration", "n", "date"]].astype(object).values
-                            if _hover_ok else None),
+                            if _hover_ok else
+                            (pc_df[["duration"]].astype(object).values
+                             if _hover_dur else None)),
                 hovertemplate=(
                     "duration <b>%{customdata[0]}</b><br>"
                     "%{customdata[1]} effort(s) in the window<br>"
                     "best on %{customdata[2]|%d %b %Y}<extra>power curve</extra>"
-                ) if _hover_ok else None))
+                ) if _hover_ok else (
+                    "exact duration <b>%{customdata[0]}</b>"
+                    "<extra>mean-maximal power</extra>"
+                    if _hover_dur else None)))
             fig_pc.add_hline(y=FTP_CURRENT, line_dash="dot", line_color=C["yellow"])
             fig_pc.add_hline(y=FTP_TARGET, line_dash="dot", line_color=C["green"], opacity=0.4)
+            # The oldest point's label lives in the corner, not on the marker
+            # (there is no room above the first point on a log axis) — the
+            # same purple annotation the older chart drew.
+            fig_pc.add_annotation(
+                xref="paper", x=0, xanchor="left",
+                yref="y", y=float(pc_df["watts"].iloc[0]),
+                text=f"{pc_df['watts'].iloc[0]:.0f}W",
+                showarrow=False, yshift=14,
+                font=dict(color=C["purple"], size=12))
             fig_pc.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
                                         line=dict(color=C["yellow"], width=2, dash="dot"),
                                         name=f"Current FTP ({FTP_CURRENT} W)"))
@@ -249,7 +289,7 @@ def render(head, ctx):
                                         line=dict(color=C["green"], width=2, dash="dot"),
                                         name=f"Target FTP ({FTP_TARGET} W)"))
             fig_pc.update_xaxes(type="log", tickvals=pc_df["secs"].tolist(),
-                                ticktext=_pc_axis)
+                                ticktext=_pc_ticks)
             style_figure(fig_pc, "Power curve — best mean-maximal power", H_PAIR)
             legend(fig_pc, "right")
             show(fig_pc)
@@ -257,7 +297,7 @@ def render(head, ctx):
             ftp_wkg = round(FTP_CURRENT / WEIGHT_KG, 2)
             tgt_wkg = round(FTP_TARGET / WEIGHT_KG, 2)
             fig_wkg = go.Figure(go.Bar(
-                x=_pc_axis, y=pc_df["wkg"],
+                x=_pc_ticks, y=pc_df["wkg"],
                 marker_color=[C["purple"] if w >= 8.0 else C["red"] if w >= 5.0
                               else C["orange"] if w >= 4.0 else C["yellow"] if w >= 3.5
                               else C["accent"] for w in pc_df["wkg"]],
@@ -304,6 +344,19 @@ def render(head, ctx):
                 "**Source: `data/power_curve.csv`** — a mean-maximal export "
                 "already sitting in your data folder. Every point is read from "
                 "that file as it is; nothing on this chart is recomputed."
+            )
+        elif pc_src == "live":
+            st.caption(
+                f"**Source: intervals.icu's mean-maximal power endpoint "
+                f"(fetched just now).** {len(pc_df)} standard durations — the "
+                f"best power you actually sustained at each, across your rides "
+                f"in the last 365 days — scaled by "
+                f"{POWER_CORRECTION:g} (the Oct 2024–Dec 2025 power-meter "
+                f"over-read correction the older pipeline measured). A "
+                f"duration with no effort near it is absent, never "
+                f"interpolated; the exact length is on the hover. The endpoint "
+                f"returns no per-point dates or counts, so this chart does "
+                f"not print them."
             )
 
     # ── Interval watts over time + power-duration law ─────────────────────
