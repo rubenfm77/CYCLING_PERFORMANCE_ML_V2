@@ -137,6 +137,12 @@ def _get_api_credentials():
 _API_STATUS: dict = {"ok": False, "rows": 0, "newest": None, "error": None,
                      "athlete": None, "days": 60, "attempted": False}
 
+# Planned-calendar workout name per DATE, filled by the last live sync and
+# read by the last-resort label fill in load_data. Kept as a module global
+# (not df.attrs) because the recent frame is concatenated with the CSV base
+# frame, and pd.concat does not reliably carry .attrs across the merge.
+_EVENT_BY_DATE: dict = {}
+
 _KNOWN_TYPES = [
     "AEROBIC BASE", "VO2MAX", "VO2 MAX", "Q-I INTERVALS", "FATMAX",
     "PIRAMIDAL", "PYRAMID", "BILLAT", "TORQUE", "TEMPO", "END", "FTP", "SST",
@@ -186,6 +192,58 @@ def _match_type(row) -> str:
     return "—"
 
 
+def _fetch_event_labels(days_back: int = 60) -> tuple[dict, dict]:
+    """Calendar-event training-type labels from intervals.icu.
+
+    Returns ({activity id: label}, {date: label}) — the athlete's OWN planned
+    workout name per ride. The first map is the explicit pairing a ride carries
+    via `paired_event_id` (the strongest non-Description signal there is: the
+    athlete linked that ride to that planned session). The second is a plain
+    date map of every planned workout in the window, used only as a LAST
+    resort after the content-based auto rules, so a session ridden on a
+    different day than planned is never labelled by the wrong day's plan.
+
+    Only names that resolve to a known training type are kept (a planned
+    "RACE" or "REST" stays blank rather than inventing a label). Any failure
+    returns empty maps — labels are a nicety, never a reason to fail a sync.
+    """
+    athlete_id, api_key = _get_api_credentials()
+    empty = ({}, {})
+    if not athlete_id or not api_key:
+        return empty
+    date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00")
+    date_to = datetime.now().strftime("%Y-%m-%dT23:59:59")
+    try:
+        r = requests.get(
+            f"https://intervals.icu/api/v1/athlete/{athlete_id}/events",
+            auth=("API_KEY", api_key),
+            params={"oldest": date_from, "newest": date_to},
+            timeout=30,
+        )
+        r.raise_for_status()
+        events = r.json() or []
+    except Exception:
+        return empty
+    if not isinstance(events, list):
+        return empty
+    by_id: dict = {}
+    by_date: dict = {}
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("name")
+        lab = _label_from_description(name)
+        if not lab:
+            continue
+        eid = e.get("id")
+        if eid is not None:
+            by_id[str(eid)] = lab
+        d = e.get("start_date_local") or e.get("start_date")
+        if d:
+            by_date[str(d)[:10]] = lab
+    return by_id, by_date
+
+
 def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     athlete_id, api_key = _get_api_credentials()
     _API_STATUS.update({"attempted": True, "days": days_back,
@@ -211,6 +269,17 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     if not data:
         _API_STATUS["ok"] = True
         return pd.DataFrame()
+    # The athlete's own training-type labels live on the CALENDAR, not in the
+    # activity payload: a planned workout is named "AEROBIC BASE" / "FTP" /
+    # "BILLAT" and the completed ride is linked to it by `paired_event_id`.
+    # The app never read events, so every linked-but-descriptionless ride
+    # showed as "—" even though intervals.icu displayed its label. Two maps
+    # are kept: the EXPLICIT pairing (highest-trust, applied with the
+    # Description) and the plain date→event map (applied last, after the
+    # content-based auto rules, so a late-riding day whose own event says
+    # AEROBIC BASE but whose ride was 30x29s BILLAT work is caught by
+    # auto-billat and never mislabelled by the calendar).
+    _pair_label, _day_label = _fetch_event_labels(days_back)
     df = pd.json_normalize(data)
     rename_map = {
         "start_date_local": "date", "moving_time": "duration_secs",
@@ -245,10 +314,22 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
         _desc_lab = df["icu_description"].map(_label_from_description)
     else:
         _desc_lab = pd.Series(None, index=df.index)
+    # The EXPLICIT pairing (a ride linked to its planned calendar workout) is
+    # trusted exactly like a typed Description — it is the athlete's own label,
+    # just stored on the event instead of the activity. It fills only what the
+    # Description left blank.
+    _pair_lab = df["id"].astype(str).map(_pair_label) \
+        if "id" in df.columns else pd.Series(None, index=df.index)
     df["training_type"] = [
-        d if d else (m if m != "—" else "—")
-        for d, m in zip(_desc_lab, df.apply(_match_type, axis=1))
+        d if d else (p if p else (m if m != "—" else "—"))
+        for d, p, m in zip(_desc_lab, _pair_lab, df.apply(_match_type, axis=1))
     ]
+    # Publish the date→event map for the LAST-resort fill in load_data (after
+    # the auto rules), so a plan written on the wrong day never outranks
+    # content. A module global, not df.attrs: the frame is concatenated with
+    # the CSV base frame later and attrs does not reliably survive a concat.
+    global _EVENT_BY_DATE
+    _EVENT_BY_DATE = dict(_day_label)
     _API_STATUS.update({
         "ok": True,
         "rows": int(len(df)),
@@ -627,6 +708,27 @@ def load_data() -> pd.DataFrame:
     _n_base = int(_m_base.sum())
     df.attrs["auto_billat_n"] = int(_n_billat)
     df.attrs["auto_base_n"] = int(_n_base)
+
+    # ── LAST RESORT: the planned calendar workout on that date ────────────────
+    # Everything above is content the ride itself carried (Description, the
+    # explicit pairing, the auto rules reading what was actually ridden). Only
+    # when all of them left the row blank does the day's PLANNED event name
+    # fill in. This is what makes a plain easy ride show the "AEROBIC BASE"
+    # its calendar promised, without ever overriding the 30x29 s of real
+    # BILLAT work that a late-ridden session carries (auto-billat above has
+    # already claimed that row, so it is no longer blank here).
+    _ev_by_date = _EVENT_BY_DATE or {}
+    if _ev_by_date and "date" in df.columns:
+        _still_blank2 = (df["training_type"].astype(str).str.strip() == "—") \
+            & _is_ride
+        _dstr = df["date"].dt.strftime("%Y-%m-%d") \
+            if hasattr(df["date"], "dt") else df["date"].astype(str).str[:10]
+        _m_event = _still_blank2 & _dstr.map(_ev_by_date).notna()
+        df.loc[_m_event, "training_type"] = _dstr[_m_event].map(_ev_by_date)
+        df.loc[_m_event, "label_source"] = "event-date"
+        df.attrs["event_date_n"] = int(_m_event.sum())
+    else:
+        df.attrs["event_date_n"] = 0
 
     # VO2max estimate (ACSM leg-cycling: 10.8 × W/kg + 7) from Critical Power.
     if "vo2max_power" not in df.columns and "icu_pm_cp" in df.columns:

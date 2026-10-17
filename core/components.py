@@ -100,25 +100,21 @@ _CSS = """
   div[data-testid="stRadio"] label:hover { background: #161b22; border-color: #30363d; }
   div[data-testid="stRadio"] label:hover p { color: #58a6ff; }
   div[data-testid="stRadio"] label:has(input:checked) {
-    background: linear-gradient(135deg, #1f6feb, #388bfd);
+    background: #1f6feb;
     border-color: rgba(120,190,255,0.55);
-    box-shadow: 0 3px 14px rgba(56,139,253,0.35);
   }
   div[data-testid="stRadio"] label:has(input:checked) p {
     color: #ffffff !important; font-weight: 700;
   }
 
   /* ── Hero panel (overview) + compact page header ─────────────────────── */
+  /* Flat panel: the earlier radial glow blob and gradient fill were pure
+     decoration. The coach wants the data, not the background. */
   .cm-hero {
     position: relative; overflow: hidden;
-    background: linear-gradient(135deg, #161b22 0%, #151b26 55%, #131a28 100%);
+    background: #161b22;
     border: 1px solid #262c36; border-left: 4px solid #58a6ff;
     border-radius: 16px; padding: 22px 26px; margin: 4px 0 14px;
-  }
-  .cm-hero::after {
-    content: ""; position: absolute; top: -170px; right: -130px;
-    width: 390px; height: 390px; pointer-events: none;
-    background: radial-gradient(circle, rgba(88,166,255,0.14), transparent 65%);
   }
   .cm-hero h1 { margin: 0; font-size: 1.65rem; }
   .cm-hero .cm-sub { color: #8b949e; font-size: 0.86rem; margin-top: 6px; }
@@ -130,25 +126,16 @@ _CSS = """
   .cm-hero-ic {
     width: 44px; height: 44px; flex: none; border-radius: 13px;
     font-size: 1.25rem; display: flex; align-items: center; justify-content: center;
-    background: rgba(88,166,255,0.10); border: 1px solid rgba(88,166,255,0.35);
+    background: #161b22; border: 1px solid #30363d;
   }
 
-  /* ── KPI card: accent strip, hover lift, auto height (never clipped) ─── */
+  /* ── KPI card: flat, auto height (never clipped) ──────────────────────── */
+  /* No accent strip, no gradient, no hover lift — decoration removed. */
   .cm-card {
     position: relative; overflow: hidden;
-    background: linear-gradient(180deg, #161b22 0%, #141a22 100%);
+    background: #161b22;
     border: 1px solid var(--line); border-radius: 14px;
     padding: 15px 17px; min-height: 120px;
-    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-  }
-  .cm-card::before {
-    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-    background: linear-gradient(90deg, var(--acc, #58a6ff), rgba(0,0,0,0) 72%);
-    opacity: 0.75;
-  }
-  .cm-card:hover {
-    transform: translateY(-2px); border-color: #30363d;
-    box-shadow: 0 10px 26px rgba(0,0,0,0.45);
   }
   .cm-card .cm-label {
     font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.1em;
@@ -181,8 +168,7 @@ _CSS = """
     font-size: 0.9rem; font-weight: 700; letter-spacing: 0.07em;
     text-transform: uppercase; color: #58a6ff; white-space: nowrap;
   }
-  .cm-sec-line { flex: 1; height: 1px;
-                 background: linear-gradient(90deg, #30363d, rgba(48,54,61,0)); }
+  .cm-sec-line { flex: 1; height: 1px; background: #30363d; }
 
   /* ── State badge / callout ───────────────────────────────────────────── */
   .cm-badge {

@@ -576,15 +576,22 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
             H_STD)
         _lane_legend(fig_l, [t.name for t in fig_l.data], min_w=430)
         # Ticks read seconds under a minute and minutes above it — the same
-        # rule as every other duration on the dashboard, never `880 s`. An
-        # axis type can carry 198 distinct durations, so the ticks are a
-        # readable sample of them (first, last, evenly spaced in between)
-        # instead of 198 labels fighting for one line.
+        # rule as every other duration on the dashboard, never `880 s`. The
+        # ticks are NOMINAL round durations (30 s, 1, 2, 3, 5, 8, 10 … min)
+        # inside the fitted range, not a sample of the observed lengths: a
+        # sampled tick lands on whatever the detector happened to cut
+        # ("1:34", "2:11") and those read as noise, not as a scale.
         _vals = list(obs["secs"])
         _step = int(np.ceil(len(_vals) / 12.0)) if _vals else 1
-        _sel = _vals[::_step]
-        if _vals and _sel[-1] != _vals[-1]:
-            _sel.append(_vals[-1])
+        _NOM = [15, 30, 60, 90, 120, 180, 300, 480, 600, 900, 1200,
+                1500, 1800, 2400, 3000, 3600, 4800, 5400, 7200, 9000]
+        _tlo = float(pl.get("t_lo") or (min(_vals) if _vals else 0))
+        _thi = float(pl.get("t_hi") or (max(_vals) if _vals else 0))
+        _sel = [v for v in _NOM if _tlo <= v <= _thi]
+        if len(_sel) > 10:                      # never crowd one axis line
+            _sel = _sel[::int(np.ceil(len(_sel) / 10.0))]
+        if _vals and not _sel:                  # degenerate range: fall back
+            _sel = _vals[::_step][:12]
         _ticks = iw.axis_labels(_sel)
         fig_l.update_xaxes(title_text="duration", tickmode="array",
                            tickvals=_sel, ticktext=_ticks)

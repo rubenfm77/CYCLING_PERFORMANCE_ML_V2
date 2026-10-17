@@ -910,6 +910,15 @@ def _iv_runs(rows: pd.DataFrame) -> list:
     if cur is not None:
         runs.append(cur)      # a ride's tail never shortens its last effort
     return [{"secs": r["secs"], "w": r["energy"] / r["secs"],
+             # Held WORK seconds (the parts only, no bridged dip): the
+             # length the athlete actually kept power down. The span `secs`
+             # above can read minutes longer on a session the detector cut
+             # at every wobble — a 20-minute FTP effort held 20:45 of work
+             # across three micro-breaks spans 24:07 — and that inflated
+             # span is what filed it under "20-30 min" instead of the
+             # 20-minute class it was. `parts` already carried the pieces;
+             # this keeps their sum so the class can be the honest length.
+             "work_secs": float(sum(r["parts"])),
              "parts": r["parts"], "seqs": r["seqs"], "n_dips": r["n_dips"]}
             for r in runs if r["secs"] > 0]
 
@@ -924,7 +933,7 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
     ever rebuilt without a peak window vouching for it.
     """
     cols = ["activity_id", "date", "day", "secs", "w", "cls", "parts",
-            "pieces", "seqs", "n_dips", "peak_w", "peak_s"]
+            "pieces", "seqs", "n_dips", "peak_w", "peak_s", "work_secs"]
     empty = pd.DataFrame(columns=cols)
     if iv is None or not len(iv) or df_all is None or not len(df_all):
         return empty
@@ -976,6 +985,7 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
             continue
         for run in _iv_runs(g):
             s, w, pk_s, pk_w = run["secs"], run["w"], float(p.pk_s), float(p.pk_w)
+            work_s = float(run.get("work_secs") or s)
             if s < REBUILD_MIN_S:
                 continue
             if abs(s - pk_s) > REBUILD_LEN_TOL * pk_s:
@@ -991,13 +1001,23 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
                 "day": pd.Timestamp(p.date).normalize(),
                 "secs": int(round(s)),
                 "w": float(w),
-                "cls": rep_class(s),
+                # Class by the HELD work seconds, not the dip-bridged span.
+                # A 2x20 FTP session the detector cut at every wobble held
+                # ~20:45 per rep but SPANS 24:07 once the micro-breaks are
+                # bridged, and the span is what was filing it under
+                # "20-30 min" — reading as an over-20 effort the athlete
+                # never rode. The class answers "what protocol was this",
+                # and the protocol length is the time power was actually
+                # held. The exact span still travels in `secs` and the
+                # pieces name every fragment, so nothing is hidden.
+                "cls": rep_class(work_s),
                 "parts": len(run["parts"]),
                 "pieces": " + ".join(fmt_rep(x) for x in run["parts"]),
                 "seqs": tuple(float(x) for x in run["seqs"]),
                 "n_dips": int(run["n_dips"]),
                 "peak_w": float(pk_w),
                 "peak_s": int(round(pk_s)),
+                "work_secs": int(round(work_s)),
             })
     return pd.DataFrame(rows, columns=cols)
 
@@ -1121,6 +1141,7 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
     # minutes. `iv=None` leaves this empty and every session draws its meter.
     det_by = {}
     short_max_by = {}
+    short_n_by = {}
     if iv is not None and len(iv) and "activity_id" in iv.columns:
         _w = iv[iv["iv_type"].astype(str).str.upper() == "WORK"].copy()
         _w["secs"] = pd.to_numeric(_w["secs"], errors="coerce")
@@ -1134,6 +1155,17 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
             short_max_by = {
                 str(a): float(g["secs"].max()) for a, g in
                 _w.groupby(_w["activity_id"].astype(str), sort=False)}
+            # How many REP-length (< 90 s) WORK rows the session carries. A
+            # rep session (10+ short rows) is Billat work by construction; its
+            # long rows are the easy spin around the sets, not intervals. The
+            # count is what lets the meter-window guard below still bite when
+            # one stray 11-minute spin would otherwise defeat a longest-row
+            # test — the spin is real but it is not the prescription.
+            _short = _w[_w["secs"] < 90.0]
+            if len(_short):
+                short_n_by = {
+                    str(a): int(len(g)) for a, g in
+                    _short.groupby(_short["activity_id"].astype(str), sort=False)}
         _w = _w[_w["secs"] >= LONG_MIN_S]
         if len(_w):
             det_by = {a: g for a, g in
@@ -1242,10 +1274,20 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
         # minutes and up) and meter-only sessions, never a blend
         # masquerading as an interval. Needs detector evidence to bite, so
         # a meter-only session still draws its window instead of nothing.
+        #
+        # The rep-session clause is what catches a Billat day whose ONLY long
+        # row is the easy spin between/after the sets (16 Oct 2026: a 510 s
+        # window over a 44 s x 24 rep session, with an 11-minute 184 W spin
+        # defeating the longest-row test). A session carrying 10+ rep-length
+        # rows is rep work by construction, so any sub-ten-minute window over
+        # it is a blend and is skipped — the spin is real but it is not the
+        # prescription, and the reps are already drawn by the rep line.
         _pk_s = float(s.at[i])
         _short_max = short_max_by.get(look)
-        if (_pk_s < LONG_MIN_S and _short_max is not None
-                and _short_max < LONG_MIN_S):
+        _short_n = short_n_by.get(look, 0)
+        if _pk_s < LONG_MIN_S and (
+                (_short_max is not None and _short_max < LONG_MIN_S)
+                or _short_n >= 10):
             continue
         if drew:
             continue
