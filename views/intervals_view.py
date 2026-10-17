@@ -528,10 +528,17 @@ def _tok(v, unit: str = "", fmt: str = "{:.0f}") -> str:
     return fmt.format(x) + unit if np.isfinite(x) else "—"
 
 
-def _rep_bar_figure(pv: dict) -> go.Figure:
+def _rep_bar_figure(pv: dict, rep_flags: list | None = None) -> go.Figure:
     """One bar per individual interval; bars are grouped into one slot per
     session, with that session's average watts marked. No smoothing, no
-    invented points — what you see is what intervals.icu recorded."""
+    invented points — what you see is what intervals.icu recorded.
+
+    `rep_flags` is a list of (slot index, previous rep s, current rep s) for
+    every session whose mean rep length changed materially from the one before
+    it inside this same duration class. A 30 s → 44 s prescription change does
+    not move the bars out of the band, so without the flag both halves look
+    like one continuous set of reps and neither can be read at its own length.
+    """
     bars = pv["bars"]
     sess = pv["sessions"]
     dates = list(sess["date"])
@@ -608,6 +615,18 @@ def _rep_bar_figure(pv: dict) -> go.Figure:
                      ticktext=[pd.Timestamp(d).strftime("%d %b")
                                for d in dates],
                      range=[-0.6, len(dates) - 0.4], showgrid=False)
+    # Mark each rep-length change: a dashed boundary at the first session of
+    # the new length, labelled old → new. The line sits BETWEEN the two slots
+    # so it never covers a bar; the label rides the top of that column.
+    for _i, _prev, _cur in (rep_flags or []):
+        if not (0 < _i < len(dates) + 1):
+            continue
+        fig.add_vline(x=_i - 0.5, line_dash="dash", line_width=1.5,
+                      line_color=C["yellow"])
+        fig.add_annotation(x=_i - 0.5, xref="x", yref="paper", y=1.0,
+                           showarrow=False, textangle=-90, yanchor="top",
+                           text=f"rep {fmt_min(_prev)} → {fmt_min(_cur)}",
+                           font=dict(size=11, color=C["yellow"]))
     return fig
 
 
@@ -1017,7 +1036,19 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                        "These are single efforts, so there is no within-set "
                        "fade to read — the dotted line is just that day's "
                        "effort:"))
-        fig = _rep_bar_figure(pv)
+        # Flag rep-length changes inside this one duration class: when the
+        # prescription's rep length shifts (30 s → 44 s on 16 Oct) the bars
+        # stay in the same band, so both halves would otherwise read as one
+        # continuous run of reps and neither could be analysed at its own
+        # length. Material = ≥ 10 s from the previous session's mean rep.
+        _sm = (pd.to_numeric(pv["sessions"]["secs_mean"], errors="coerce")
+               .to_numpy() if "secs_mean" in pv["sessions"].columns
+               else np.array([]))
+        _flags = [(i, float(_sm[i - 1]), float(_sm[i]))
+                  for i in range(1, len(_sm))
+                  if np.isfinite(_sm[i]) and np.isfinite(_sm[i - 1])
+                  and abs(float(_sm[i]) - float(_sm[i - 1])) >= 10.0]
+        fig = _rep_bar_figure(pv, _flags)
         style_figure(
             fig,
             f"{series_name(fam, cls)} — individual intervals, "
@@ -1026,6 +1057,15 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         _lane_legend(fig, ["Individual interval (avg W)", "Session average"],
                      min_w=430, cols=3)
         show(fig)
+        if _flags:
+            st.caption(
+                "**Rep-length change flagged** (dashed line): "
+                + "; ".join(
+                    f"{pd.Timestamp(pv['sessions']['date'].iloc[i]).strftime('%d %b %Y')} "
+                    f"mean rep {fmt_min(p)} → {fmt_min(c)}"
+                    for i, p, c in _flags)
+                + ". Same duration class, different rep length — read each "
+                  "side of the line at its own rep length.")
     else:
         callout("Individual interval rows not in the cache",
                 "The raw interval rows of this series are not in the local "

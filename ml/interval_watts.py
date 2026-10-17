@@ -848,6 +848,10 @@ DETECTED_EFFORT_SRC = "detected interval"
 # chart — from ten minutes up. Same floor as the peak fill, the FTP detail
 # and phys_class: a 13-second start-line sprint is never an interval.
 LONG_MIN_S = 600.0
+# Two lengths within 20 % of each other are one effort, not a repeat. Defined
+# here (not in ml.set_evolution, which holds the original) because that module
+# imports this one — importing it back would cycle. Same value: 0.20.
+SPAN_REPEAT_TOL = 0.20
 
 
 def _iv_runs(rows: pd.DataFrame) -> list:
@@ -1180,6 +1184,7 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
     # Local 0.5: same bar as COHERENT_MIN_RATIO over there; kept in sync.
     dup_keep = _iv_dup_map(iv) if iv is not None and len(iv) else {}
     rows = []
+    _merge_skip: list[int] = []   # detector rows skipped as merged work+recovery
     for i in df.index[ok]:
         d = df.at[i, "date"] if "date" in df.columns else None
         # Normalised to the calendar day. Two rides on one date can carry
@@ -1220,6 +1225,19 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
             # the detail uses, so both pages draw it or neither does.
             det = det_by.get(look)
             if det is not None and len(det) and "seq" in det.columns:
+                # The rebuild already reconstructed the held work of this
+                # session from its parts. A detector row much longer than EVERY
+                # run, at LOWER watts, is not a separate effort — it is the head
+                # unit's merged "work + recovery" block of the same effort: the
+                # rebuild's held work sits inside it, and averaging the easy
+                # recoveries in drags the watts down (22 Sep: a 1702 s @ 195 W
+                # block containing the real 1202 s @ 241 W rebuild). Drawing it
+                # beside the rebuild would count one effort twice under two
+                # durations. Skip it, and count it so the page can say so. The
+                # rule is scoped to rebuild sessions only: without a rebuild the
+                # detector's own sustained row IS the effort and must draw.
+                _run_max = float(hits["secs"].max()) if len(hits) else 0.0
+                _run_wmax = float(hits["w"].max()) if len(hits) else 0.0
                 _sq = pd.to_numeric(det["seq"], errors="coerce")
                 for r in det[_sq.apply(lambda x: not (
                         np.isfinite(x) and float(x) in consumed)
@@ -1227,6 +1245,10 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
                     try:
                         _rs, _rw = float(r.secs), float(r.avg_w)
                     except (TypeError, ValueError):
+                        continue
+                    if (_run_max > 0 and _rs > _run_max * (1.0 + SPAN_REPEAT_TOL)
+                            and _rw < _run_wmax):
+                        _merge_skip.append(int(round(_rs)))
                         continue
                     rows.append({**base, "secs": int(round(_rs)),
                                  "cls": rep_class(_rs), "w": float(_rw),
@@ -1305,6 +1327,10 @@ def effort_best(df: pd.DataFrame, iv: pd.DataFrame | None = None) -> pd.DataFram
         # "2026-05-01 08:30:00" — which pd.to_datetime refuses without an
         # explicit format.
         out["year"] = pd.to_datetime(out["day"]).dt.year
+    # How many detector rows were dropped as merged work+recovery blocks of an
+    # effort the rebuild already counted. Surfaced so the page can disclose the
+    # skip rather than silently omit a bar (22 Sep's 1702 s block, e.g.).
+    out.attrs["merge_skipped"] = list(_merge_skip)
     return out
 
 

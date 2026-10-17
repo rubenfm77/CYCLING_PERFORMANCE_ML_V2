@@ -23,7 +23,8 @@ import pandas as pd
 # The rebuild lives with the rep classes and the peak-meter columns because it
 # must answer to both: it joins the detector's fragments, and it is judged
 # against the meter's window. Imported, not retyped.
-from ml.interval_watts import REBUILD_SRC, rebuilt_efforts  # noqa: E402
+from ml.interval_watts import (REBUILD_SRC, SPAN_REPEAT_TOL,  # noqa: E402
+                               rebuilt_efforts)
 
 # Minimum pairwise observations before an association is shown at all.
 MIN_ASSOC_N = 8
@@ -259,7 +260,7 @@ DETECTED_SRC = "detected interval"
 # than the longest of them. A meter window shorter than, or near, the
 # longest effort is that effort's own reading and is kept — e.g. a 20:00
 # best window over a ride whose detector also cut a 28-minute block.
-SPAN_REPEAT_TOL = 0.20   # repeats: two sustained efforts within 20 % length
+# SPAN_REPEAT_TOL is imported from ml.interval_watts (single source of truth).
 SPAN_MARGIN = 1.10       # window must be > 10 % longer than the longest
 
 

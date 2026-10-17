@@ -509,8 +509,6 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
                 f"{iw.MIN_FIT_PTS} needed). Sync more activities, or pick "
                 f"another training type.", C["yellow"], "\U0001F6A7")
         return
-    focus = (f"{n_focus:,} {phys + ' ' if phys else ''}effort(s) charted above · "
-             if n_focus else "")
     st.caption(
         f"Fitted on the BEST watts observed at each distinct duration for "
         f"**{tt}** — every year, every effort, because the law IS the "
@@ -518,24 +516,10 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
         f"{pl['n']} distinct durations, "
         f"{fmt_min(pl['t_lo'])} to {fmt_min(pl['t_hi'])}."
     )
-    pc = st.columns(5)
-    with pc[0]:
-        metric_card("CP", f"{pl['cp']:.0f} W",
-                    f"model P = CP + W′/t · R² = {pl['r2_cp']}", "accent")
-    with pc[1]:
-        metric_card("W′", f"{pl['w_prime_kj']:.1f} kJ",
-                    f"anaerobic capacity · R² = {pl['r2_cp']}", "green")
-    with pc[2]:
-        metric_card("Exponent b", f"{pl['b']:.3f}",
-                    f"P = a·t^-b, a = {pl['a']:.0f} · R² = {pl['r2_law']}",
-                    "purple")
-    with pc[3]:
-        metric_card("Durations fitted", f"{pl['n']}",
-                    f"{fmt_min(pl['t_lo'])} – {fmt_min(pl['t_hi'])}",
-                    "muted")
-    with pc[4]:
-        metric_card("n (efforts)", f"{int(len(M_all[M_all['tt'] == tt])):,}",
-                    focus + f"all years of {tt}", "yellow")
+    # The fit numbers (CP, W′, exponent b) live in the bullet list under the
+    # chart — the row of metric cards that used to sit above it was a wall of
+    # decoration between the reader and the one picture that matters, and it
+    # repeated every number the bullets already state.
 
     # The law itself, drawn: observed bests as points, both fits as lines.
     fit_frame = _power_law_frame(M_all, tt)
@@ -593,7 +577,13 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
         if _vals and not _sel:                  # degenerate range: fall back
             _sel = _vals[::_step][:12]
         _ticks = iw.axis_labels(_sel)
-        fig_l.update_xaxes(title_text="duration", tickmode="array",
+        # LOG scale: the durations span 10 s to 50 min, and a linear axis
+        # crams everything under five minutes into the left sliver — which is
+        # exactly why the short-duration ticks read as an unreadable smear.
+        # A log x-axis is the standard shape of a power-duration curve and
+        # spreads the seconds so each nominal tick gets its own column.
+        fig_l.update_xaxes(title_text="duration", type="log",
+                           tickmode="array",
                            tickvals=_sel, ticktext=_ticks)
         fig_l.update_yaxes(tickformat=",.0f", rangemode="tozero")
         show(fig_l)
