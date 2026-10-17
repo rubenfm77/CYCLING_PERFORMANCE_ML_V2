@@ -559,16 +559,18 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
             f"neither line is extended beyond the fitted range.</sup>",
             H_STD)
         _lane_legend(fig_l, [t.name for t in fig_l.data], min_w=430)
-        # Ticks read seconds under a minute and minutes above it — the same
-        # rule as every other duration on the dashboard, never `880 s`. The
-        # ticks are NOMINAL round durations (30 s, 1, 2, 3, 5, 8, 10 … min)
-        # inside the fitted range, not a sample of the observed lengths: a
-        # sampled tick lands on whatever the detector happened to cut
-        # ("1:34", "2:11") and those read as noise, not as a scale.
+        # Ticks are NOMINAL round durations the athlete actually names —
+        # 30 s, 1, 2, 5, 10, 20, 30 min … — never a sample of the observed
+        # lengths (a sampled tick lands on whatever the detector happened to
+        # cut: "1:38", "2:51", which read as noise, not a scale), and never
+        # two rungs that round to the same word. 90 s is deliberately absent:
+        # it rounds to "1 min" — the same word as 60 s — and axis_labels would
+        # then fall back to m:ss ("1:00"/"1:30"), the exact format rejected.
+        # One rung per word keeps every tick a clean round duration.
         _vals = list(obs["secs"])
         _step = int(np.ceil(len(_vals) / 12.0)) if _vals else 1
-        _NOM = [15, 30, 60, 90, 120, 180, 300, 480, 600, 900, 1200,
-                1500, 1800, 2400, 3000, 3600, 4800, 5400, 7200, 9000]
+        _NOM = [15, 30, 60, 120, 300, 600, 1200, 1800, 3000, 3600,
+                5400, 7200]
         _tlo = float(pl.get("t_lo") or (min(_vals) if _vals else 0))
         _thi = float(pl.get("t_hi") or (max(_vals) if _vals else 0))
         _sel = [v for v in _NOM if _tlo <= v <= _thi]
