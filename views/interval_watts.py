@@ -579,6 +579,20 @@ def _law_section(M_all: pd.DataFrame, tt: str, n_focus: int,
         if _vals and not _sel:                  # degenerate range: fall back
             _sel = _vals[::_step][:12]
         _ticks = iw.axis_labels(_sel)
+        # The ladder is round durations, so its last rung can fall well short
+        # of the longest effort — FTP runs to 1702 s with the 30-min rung out
+        # of range, AEROBIC BASE to 2964 s with the 50-min rung 36 s beyond —
+        # and the axis then read as if it stopped at 20 min / 30 min while the
+        # curve kept going past the last label. The measured end joins the
+        # ladder as the final tick, named by the same rule as every other
+        # tick (nearest 5 min from ten up: 28:22 → "30 min"), and only when
+        # its word differs from the rung beside it — two ticks reading one
+        # word is what sends the labels back to m:ss.
+        if _sel and int(_thi) > _sel[-1]:
+            _cand = _sel + [int(_thi)]
+            _end_labs = iw.axis_labels(_cand)
+            if not any(":" in s for s in _end_labs):
+                _sel, _ticks = _cand, _end_labs
         # LOG scale: the durations span 10 s to 50 min, and a linear axis
         # crams everything under five minutes into the left sliver — which is
         # exactly why the short-duration ticks read as an unreadable smear.

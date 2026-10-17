@@ -533,24 +533,14 @@ def load_data() -> pd.DataFrame:
     # Alias spellings collapse onto the agreed label BEFORE the duplicate-ride
     # rule below compares labels, so one ride filed as "RONNESTAD" and another as
     # "BILLAT" is recognised as the same session rather than kept as two.
-    df.attrs["labels_aliased"] = _aliased = _apply_type_aliases(df)
-    if _aliased:
-        st.caption(
-            f"{_aliased:,} session label(s) written as an alias were read as "
-            f"{', '.join(sorted(set(TYPE_ALIASES.values())))} "
-            f"({', '.join(f'{k} -> {v}' for k, v in sorted(TYPE_ALIASES.items()))}). "
-            f"They are the same session type, so they are counted together and "
-            f"can be compared across years."
-        )
-    df.attrs["labels_english"] = _englished = _apply_english_labels(df)
-    if _englished:
-        st.caption(
-            f"{_englished:,} session label(s) written in Catalan/Spanish read "
-            f"in English "
-            f"({', '.join(f'{k} -> {v}' for k, v in sorted(TYPE_ENGLISH.items()))}). "
-            f"Nothing merged: each keeps its own sessions under the English "
-            f"spelling."
-        )
+    # Both label rewrites are still counted and recorded on the frame — the
+    # mapping itself lives in core/theme.py — but the athlete asked for the
+    # page-top disclosure lines to go: they printed the full 15-entry mapping
+    # at the top of every page on every load, which is noise once read. The
+    # rewriting is unchanged and exact-match only; nothing merged, nothing
+    # hidden in the data.
+    df.attrs["labels_aliased"] = _apply_type_aliases(df)
+    df.attrs["labels_english"] = _apply_english_labels(df)
 
     for col in ["tss", "power_avg", "hr_avg", "duration_h", "elevation",
                 "if_score", "power_np", "power_max", "cadence"]:
