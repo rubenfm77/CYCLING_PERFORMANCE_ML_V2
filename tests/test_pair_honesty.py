@@ -199,19 +199,28 @@ check("the run remembers which rows it was joined from",
 from ml.protocol_reps import _set_members, _uncovered_sets  # noqa: E402
 
 sets9 = build_sets(frag, None, rdf)
+frag_row = sets9[pd.to_numeric(sets9["rep_secs"]) == 683.0].copy()
 sets9, _ = fill_peak_efforts(sets9, rdf, iv=frag)
 sel = sets9.copy()
 sel["family"] = "FTP"
 sel["dur_cls"] = sel["rep_secs"].map(rep_class)
 sel = series_sel(sel, "FTP", dur_cls="10-20 min")
-check("the 683 fragment and the run sit in the same selection",
-      set(sel["_key"].astype(str)) == {"683s@242w92rpm",
-                                       "rebuilt:i9:1212s"},
+check("the rebuilt run replaced its 683 fragment everywhere",
+      set(sel["_key"].astype(str)) == {"rebuilt:i9:1212s"},
       sel["_key"].tolist())
-reps, consumed = _set_members(frag, sel)
+check("the fragment set is gone from the frame, not parked in another class",
+      not (pd.to_numeric(sets9["rep_secs"]) == 683.0).any(),
+      sorted(pd.to_numeric(sets9["rep_secs"]).tolist()))
+# the chart-level guard is still load-bearing for a fragment set the global
+# rule keeps (one touching a row outside the run): draw it directly.
+frag_sel = frag_row.copy()
+frag_sel["family"] = "FTP"
+frag_sel["dur_cls"] = frag_sel["rep_secs"].map(rep_class)
+both = pd.concat([sel, frag_sel], ignore_index=True)
+reps, consumed = _set_members(frag, both)
 check("the run's fragments fall out of the member rows",
       not len(reps), f"{len(reps)} member rows left")
-solo = _uncovered_sets(sel, reps, consumed)
+solo = _uncovered_sets(both, reps, consumed)
 check("the swallowed set is not solo-drawn beside the run",
       set(solo["_key"].astype(str)) == {"rebuilt:i9:1212s"},
       solo["_key"].tolist() if len(solo) else "no solo bars")

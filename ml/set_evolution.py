@@ -71,7 +71,12 @@ def _with_context(sets: pd.DataFrame, df_all=None) -> pd.DataFrame:
             ctx = ctx.reset_index().rename(columns={"index": "date"})
             if "date" not in ctx.columns and g.index.name:
                 ctx = ctx.rename(columns={g.index.name: "date"})
-            sets = sets.sort_values("date")
+            # stable: within one date the DETECTED rows must keep their order
+            # and stay ahead of the appended fill rows — quality_gates reads
+            # each activity's start time / moving time off its first row, and
+            # an unstable sort can put a metadata-less fill row first, which
+            # would blind the duplicate-ride rules and keep both copies.
+            sets = sets.sort_values("date", kind="stable")
             sets = pd.merge_asof(sets, ctx, on="date", direction="backward")
         except Exception:
             for c in ("ctl", "atl", "tsb", "tss_7", "acwr"):
@@ -462,6 +467,35 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
         src = src.assign(run_seqs=[tuple()] * len(src))
     add = pd.DataFrame(rows).reindex(columns=list(src.columns))
     out = pd.concat([src, add], ignore_index=True, sort=False)
+    # A rebuilt run replaces its fragments EVERYWHERE, not only in the chart
+    # that drew it. The set rows those fragments formed (a detector-shredded
+    # interval files as sets of two or three blips) would otherwise keep
+    # counting the same effort a second time — once as the whole run in its
+    # class, again as the blips under other rep lengths. A set falls only
+    # when EVERY row it owns is inside the run's seqs; a set touching any
+    # row outside the run is a different effort and stays as recorded.
+    if len(out) and "first_seq" in out.columns and "Source" in out.columns:
+        _repl: dict = {}
+        for r in add.itertuples(index=False):
+            if (str(getattr(r, "Source", "")) == REBUILD_SRC):
+                try:
+                    _sq = tuple(float(x) for x in (getattr(r, "run_seqs",
+                                                           ()) or ()))
+                except TypeError:
+                    _sq = ()
+                if _sq:
+                    _repl.setdefault(str(getattr(r, "activity_id", "")),
+                                     set()).update(_sq)
+        if _repl:
+            _fs = pd.to_numeric(out["first_seq"], errors="coerce")
+            _ls = pd.to_numeric(out["last_seq"], errors="coerce")
+            _drop = np.fromiter(
+                ((_a in _repl and np.isfinite(f) and np.isfinite(l)
+                  and f in _repl[_a] and l in _repl[_a])
+                 for _a, f, l in zip(out["activity_id"].astype(str),
+                                     _fs, _ls)),
+                dtype=bool, count=len(out))
+            out = out[~_drop]
     return _with_context(out, df_all), len(rows)
 
 

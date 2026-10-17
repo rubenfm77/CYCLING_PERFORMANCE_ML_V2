@@ -817,10 +817,13 @@ def power_law(m: pd.DataFrame, tt: str | None = None,
 #   * the ride's OWN peak window vouches for it: the window is at least
 #     REBUILD_MIN_S long and the detector reported nothing in its class —
 #     where the detector already told the story whole, nothing is rebuilt;
-#   * WORK rows join only across breaks shorter than REBUILD_DIP_S, the WHOLE
-#     break counted: a 27 s glance at the computer does not end a 20-minute
-#     interval, but 60 s + 60 s of rest does, so consecutive recovery rows
-#     accumulate before the decision is made;
+#   * WORK rows join only across breaks that were not a recovery — either
+#     shorter than REBUILD_DIP_S (a 27 s glance at the computer does not end
+#     a 20-minute interval; consecutive short breaks still accumulate before
+#     the decision is made, so 60 s + 60 s of rest does part it), or ridden
+#     at BRIDGE_W_FRAC of the work power for at most BRIDGE_MAX_DIP_S (a
+#     float inside the effort — see the constants below); the WHOLE break
+#     counts, with its own seconds and its own watts;
 #   * the joined run must be within REBUILD_LEN_TOL of the meter's window and
 #     within REBUILD_W_TOL of its watts. The meter is what vouches for the
 #     rebuild, so a run the meter does not describe is left alone;
@@ -836,9 +839,21 @@ def power_law(m: pd.DataFrame, tt: str | None = None,
 # description of the effort.
 REBUILD_MIN_S = 600.0        # the sustained floor, same as the peak fill
 REBUILD_NEAR_S = 120.0       # a detected effort this close IS this effort
-REBUILD_DIP_S = 90.0         # a break this short belongs to the effort
+REBUILD_DIP_S = 45.0         # a break this short is a wobble, not a recovery
 REBUILD_LEN_TOL = 0.15       # run length within 15 % of the meter's window
 REBUILD_W_TOL = 0.10         # run watts within 10 % of the meter's watts
+# A break RIDDEN at close to the work power is a float inside the effort,
+# however long it lasts: on 14 Oct 2026 the detector cut a single FTP
+# interval into six work blips parted by 171-174 s breaks ridden at 201-215 W
+# between 232-265 W work rows, while that ride's true recoveries sat at
+# 105-168 W. A pure duration rule cannot tell them apart — at its old 90 s
+# cap it bridged straight across the true 73-89 s recoveries too and built
+# phantom "efforts" of 22 and 24 minutes out of two shorter blocks each. So
+# a break up to this length is bridged when its watts average at least this
+# fraction of the mean of the two work rows it sits between; both numbers
+# are wide apart on the ride that motivated them.
+BRIDGE_W_FRAC = 0.80         # a break at >= 80 % of work power is a float
+BRIDGE_MAX_DIP_S = 240.0     # …and only up to four minutes of it
 REBUILD_SRC = "rebuilt from detector fragments"
 PEAK_ROW_SRC = "peak meter (intervals.icu)"
 # Same string as ml.set_evolution.DETECTED_SRC, defined here because that
@@ -855,15 +870,18 @@ SPAN_REPEAT_TOL = 0.20
 
 
 def _iv_runs(rows: pd.DataFrame) -> list:
-    """WORK runs of one activity, bridging breaks shorter than REBUILD_DIP_S.
+    """WORK runs of one activity, bridging breaks that were not a recovery.
 
-    `rows` is one activity's interval rows in `seq` order. A break is bridged
-    only when the WHOLE of it is short, and the break's seconds then sit
-    inside the span with their own watts weighted by their own seconds — so a
-    run's average is the block's own average, never a mean of means.
+    A break is bridged when the WHOLE of it is short (a wobble, whatever
+    its power) or when it was ridden at close to the work power on both
+    sides (a float inside the effort — BRIDGE_W_FRAC); anything else is a
+    recovery and parts the run. The break's seconds then sit inside the
+    span with their own watts weighted by their own seconds — so a run's
+    average is the block's own average, never a mean of means.
     """
     runs, cur = [], None
     dip_s = dip_e = 0.0
+    last_w = np.nan              # watts of the previous WORK row
     for r in rows.itertuples(index=False):
         try:
             secs = float(getattr(r, "secs", np.nan))
@@ -892,7 +910,15 @@ def _iv_runs(rows: pd.DataFrame) -> list:
         is_work = str(getattr(r, "iv_type", "")).strip().upper() == "WORK"
         if is_work:
             if cur is not None and dip_s > 0:
-                if dip_s < REBUILD_DIP_S:          # one effort, continued
+                # A break ridden at close to the work power on both sides is
+                # a float inside the effort, not a recovery (see
+                # BRIDGE_W_FRAC): it is bridged like a short dip, so the
+                # effort rebuilds whole instead of being filed as blips.
+                _float = (dip_s <= BRIDGE_MAX_DIP_S
+                          and np.isfinite(last_w)
+                          and (dip_e / dip_s)
+                          >= BRIDGE_W_FRAC * 0.5 * (last_w + w))
+                if dip_s <= REBUILD_DIP_S or _float:  # one effort, continued
                     cur["secs"] += dip_s
                     cur["energy"] += dip_e
                     cur["n_dips"] += 1
@@ -900,6 +926,7 @@ def _iv_runs(rows: pd.DataFrame) -> list:
                     runs.append(cur)
                     cur = None
             dip_s = dip_e = 0.0
+            last_w = w
             if cur is None:
                 cur = {"secs": 0.0, "energy": 0.0, "parts": [],
                        "seqs": [], "n_dips": 0}

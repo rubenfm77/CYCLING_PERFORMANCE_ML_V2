@@ -192,9 +192,33 @@ else:
     print(f"   rebuilt {len(reb)} row(s) from the fragments, {len(peak2)} "
           f"straight meter readings ({n2} added, {n} without a rebuild)")
 
-    assert len(filled2) == len(base) + n2, (len(filled2), len(base), n2)
-    assert (filled2["Source"] == DETECTED_SRC).sum() == len(base), \
-        "a detection was removed or retagged"
+    # A rebuild REPLACES its fragments everywhere: a detected set whose
+    # first_seq AND last_seq both sit inside one of the rebuild's runs is
+    # that run's pieces, and falls out of the frame instead of counting the
+    # same effort a second time under another rep length.
+    run_of: dict = {}
+    for r in reb.itertuples(index=False):
+        run_of.setdefault(str(r.activity_id), set()).update(
+            float(x) for x in (getattr(r, "run_seqs", ()) or ()))
+
+    def _inside(frame):
+        fs = pd.to_numeric(frame["first_seq"], errors="coerce")
+        ls = pd.to_numeric(frame["last_seq"], errors="coerce")
+        return np.fromiter(
+            ((a in run_of and np.isfinite(f) and np.isfinite(l)
+              and float(f) in run_of[a] and float(l) in run_of[a])
+             for a, f, l in zip(frame["activity_id"].astype(str), fs, ls)),
+            dtype=bool, count=len(frame))
+
+    det2 = filled2[filled2["Source"] == DETECTED_SRC]
+    m_consume = _inside(base)
+    n_consumed = int(m_consume.sum())
+    assert not _inside(det2).any(), \
+        "a fragment a rebuilt run consumed is still in the frame"
+    assert len(det2) == len(base) - n_consumed, \
+        "a detection was removed or retagged outside a rebuild's runs"
+    assert len(filled2) == len(base) + n2 - n_consumed, \
+        (len(filled2), len(base), n2)
     assert len(reb) + len(peak2) == n2
     assert len(reb), "the cache holds fragmented long efforts but none rebuilt"
 
@@ -202,8 +226,8 @@ else:
     assert (pd.to_numeric(reb["rep_secs"]) >= 600).all(), \
         "a rebuilt row under the 10-minute floor"
     assert (reb["reps"] == 1).all()
-    assert classes(filled2) == classes(base), \
-        "the short-effort side changed with the rebuild on"
+    assert classes(filled2) == classes(base[~m_consume]), \
+        "the short side changed beyond the fragments the rebuilds consumed"
     # one ride never reports the same window twice
     both = set(peak2["activity_id"].astype(str)) & set(
         reb["activity_id"].astype(str))
@@ -232,7 +256,8 @@ else:
         assert abs(r.secs - r.peak_s) <= 0.15 * r.peak_s, \
             (r.activity_id, r.secs, r.peak_s)
     print(f"   PASS  rebuild: {len(reb)} whole effort(s) with the meter "
-          f"window replaced, guards and short side unchanged")
+          f"window replaced, {n_consumed} fragment set(s) consumed, guards "
+          f"and short side unchanged")
 
     # the Set-evolution tab runs the quality screen AFTER the fill; a rebuild
     # that the screen then deleted would never reach the reader

@@ -615,18 +615,15 @@ def _rep_bar_figure(pv: dict, rep_flags: list | None = None) -> go.Figure:
                      ticktext=[pd.Timestamp(d).strftime("%d %b")
                                for d in dates],
                      range=[-0.6, len(dates) - 0.4], showgrid=False)
-    # Mark each rep-length change: a dashed boundary at the first session of
-    # the new length, labelled old → new. The line sits BETWEEN the two slots
-    # so it never covers a bar; the label rides the top of that column.
+    # Mark each rep-length change with a dashed boundary between the two
+    # slots, so it never covers a bar. The text belongs in the caption above
+    # the chart, not rotated inside it — a wall of −90° labels across a
+    # many-session series is unreadable, which is what the athlete reported.
     for _i, _prev, _cur in (rep_flags or []):
         if not (0 < _i < len(dates) + 1):
             continue
         fig.add_vline(x=_i - 0.5, line_dash="dash", line_width=1.5,
                       line_color=C["yellow"])
-        fig.add_annotation(x=_i - 0.5, xref="x", yref="paper", y=1.0,
-                           showarrow=False, textangle=-90, yanchor="top",
-                           text=f"rep {fmt_min(_prev)} → {fmt_min(_cur)}",
-                           font=dict(size=11, color=C["yellow"]))
     return fig
 
 
@@ -1037,17 +1034,50 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                        "fade to read — the dotted line is just that day's "
                        "effort:"))
         # Flag rep-length changes inside this one duration class: when the
-        # prescription's rep length shifts (30 s → 44 s on 16 Oct) the bars
+        # prescription's rep length shifts (30 s → 45 s on 16 Oct) the bars
         # stay in the same band, so both halves would otherwise read as one
         # continuous run of reps and neither could be analysed at its own
-        # length. Material = ≥ 10 s from the previous session's mean rep.
-        _sm = (pd.to_numeric(pv["sessions"]["secs_mean"], errors="coerce")
-               .to_numpy() if "secs_mean" in pv["sessions"].columns
-               else np.array([]))
+        # length. Material = ≥ 10 s from the previous session's rep.
+        # The length quoted is the MEDIAN of that session's recorded reps —
+        # the typical rep — because one early-stopped rep must not drag the
+        # label: 16 Oct's 24 recorded reps read 39–50 s around a 44 s
+        # median, while the mean printed "42 s" for a session the athlete
+        # rode at 45 s. The median is a length the session actually holds.
+        _sd = pd.to_datetime(pv["sessions"]["date"]).dt.normalize()
+        _sm = None
+        _b = pv.get("bars")
+        if (_b is not None and len(_b) and "secs" in _b.columns
+                and "date" in _b.columns):
+            _med = (_b.assign(_bd=pd.to_datetime(_b["date"]).dt.normalize())
+                    .groupby("_bd")["secs"].median())
+            _sm = _med.reindex(_sd).to_numpy(dtype=float)
+        if _sm is None or not len(_sm) or not np.isfinite(_sm).any():
+            _sm = (pd.to_numeric(pv["sessions"]["secs_mean"],
+                                 errors="coerce").to_numpy()
+                   if "secs_mean" in pv["sessions"].columns
+                   else np.array([]))
+        else:
+            # a session with no member bar (a solo set) still compares with
+            # its neighbours through the set-level mean
+            _fb = pd.to_numeric(pv["sessions"]["secs_mean"],
+                                errors="coerce").to_numpy()
+            _sm = np.where(np.isfinite(_sm), _sm, _fb)
         _flags = [(i, float(_sm[i - 1]), float(_sm[i]))
                   for i in range(1, len(_sm))
                   if np.isfinite(_sm[i]) and np.isfinite(_sm[i - 1])
                   and abs(float(_sm[i]) - float(_sm[i - 1])) >= 10.0]
+        # The caption sits ABOVE the chart, horizontal: rotated in-figure
+        # labels were unreadable on a many-session series (the athlete's
+        # report), and the change must stay readable at any series length.
+        if _flags:
+            st.caption(
+                "**Rep-length change** (dashed line): "
+                + "; ".join(
+                    f"{pd.Timestamp(pv['sessions']['date'].iloc[i]).strftime('%d %b %Y')} "
+                    f"typical rep {fmt_min(p)} → {fmt_min(c)}"
+                    for i, p, c in _flags)
+                + ". Same duration class, different rep length — read each "
+                  "side of the line at its own rep length.")
         fig = _rep_bar_figure(pv, _flags)
         style_figure(
             fig,
@@ -1057,15 +1087,6 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
         _lane_legend(fig, ["Individual interval (avg W)", "Session average"],
                      min_w=430, cols=3)
         show(fig)
-        if _flags:
-            st.caption(
-                "**Rep-length change flagged** (dashed line): "
-                + "; ".join(
-                    f"{pd.Timestamp(pv['sessions']['date'].iloc[i]).strftime('%d %b %Y')} "
-                    f"mean rep {fmt_min(p)} → {fmt_min(c)}"
-                    for i, p, c in _flags)
-                + ". Same duration class, different rep length — read each "
-                  "side of the line at its own rep length.")
     else:
         callout("Individual interval rows not in the cache",
                 "The raw interval rows of this series are not in the local "
