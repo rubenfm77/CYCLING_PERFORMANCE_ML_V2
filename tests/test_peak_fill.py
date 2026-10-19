@@ -26,8 +26,8 @@ from pathlib import Path
 
 from ml.set_evolution import (DETECTED_SRC, PEAK_SRC, REBUILD_SRC,
                               SET_COLUMNS,
-                              _dur_label, build_sets, fill_peak_efforts,
-                              quality_gates)
+                              _dur_label, _trimmed_members, build_sets,
+                              fill_peak_efforts, quality_gates)
 
 print("=" * 74)
 print("1. the rules, on synthetic sets")
@@ -131,6 +131,43 @@ assert len(clean[clean["Source"] == PEAK_SRC]) == n, \
     "the gates excluded a peak reading"
 print("   PASS  quality gates keep every added reading")
 
+# a set whose members are SPLIT by a fired run: the row is rewritten from
+# the survivors only, with build_sets' own aggregation. The rule lives in
+# `_trimmed_members`, so it is pinned here without any cache: a set kept
+# whole would chart its consumed members a second time under a short class.
+_act = pd.DataFrame([
+    {"activity_id": "e", "seq": 1, "iv_type": "WORK", "secs": 180.0,
+     "avg_w": 220.0, "load": 100.0, "date": "2026-09-25"},
+    {"activity_id": "e", "seq": 2, "iv_type": "RECOVERY", "secs": 60.0,
+     "avg_w": np.nan, "load": np.nan, "date": "2026-09-25"},
+    {"activity_id": "e", "seq": 3, "iv_type": "WORK", "secs": 185.0,
+     "avg_w": 225.0, "load": 101.0, "date": "2026-09-25"},
+    {"activity_id": "e", "seq": 4, "iv_type": "RECOVERY", "secs": 90.0,
+     "avg_w": np.nan, "load": np.nan, "date": "2026-09-25"},
+    {"activity_id": "e", "seq": 5, "iv_type": "WORK", "secs": 190.0,
+     "avg_w": 230.0, "load": 102.0, "date": "2026-09-25"},
+])
+# survivors 1 and 3: median of the two, mean watts, summed load, and the
+# one recovery row (seq 2) whose nearest work on BOTH sides survives
+_st = _trimmed_members(_act, [1.0, 3.0])
+assert _st["reps"] == 2 and abs(_st["rep_secs"] - 182.5) < 1e-9, _st
+assert abs(_st["set_w"] - 222.5) < 1e-9 and abs(_st["load"] - 201.0) < 1e-9, _st
+assert _st["first_seq"] == 1.0 and _st["last_seq"] == 3.0, _st
+assert abs(_st["rest"] - 60.0) < 1e-9, \
+    "the gap between the two survivors must be the only rest counted"
+# survivors 1 and 5: the recovery rows both touch the consumed member 3,
+# so neither gap may become this set's rest
+_st = _trimmed_members(_act, [1.0, 5.0])
+assert _st["reps"] == 2 and abs(_st["rep_secs"] - 185.0) < 1e-9, _st
+assert np.isnan(_st["rest"]), "rest around a consumed member was counted"
+# one survivor left: a single-rep row with no measurable rest
+_st = _trimmed_members(_act, [3.0])
+assert _st["reps"] == 1 and abs(_st["rep_secs"] - 185.0) < 1e-9, _st
+assert np.isnan(_st["rest"]), "a one-member set claimed a rest"
+assert _trimmed_members(_act, []) is None, "an empty survivor set must drop"
+print("   PASS  a split set is rewritten from its survivors: medians, "
+      "summed load and survivor-only rest")
+
 print()
 print("=" * 74)
 print("2. on this athlete's own cache")
@@ -193,9 +230,14 @@ else:
           f"straight meter readings ({n2} added, {n} without a rebuild)")
 
     # A rebuild REPLACES its fragments everywhere: a detected set whose
-    # first_seq AND last_seq both sit inside one of the rebuild's runs is
-    # that run's pieces, and falls out of the frame instead of counting the
-    # same effort a second time under another rep length.
+    # every member row sits inside the rebuild's runs falls out of the
+    # frame instead of counting the same effort a second time under
+    # another rep length, and a set whose members are SPLIT across a run
+    # and the open road is trimmed to the members the run did not take
+    # (rewritten from them alone — kept whole it would chart a consumed
+    # member twice, once in the run's class and again in its own). The
+    # set's membership decides; the two-endpoint rule below stays only
+    # as the fallback for keys the cache cannot resolve.
     run_of: dict = {}
     for r in reb.itertuples(index=False):
         run_of.setdefault(str(r.activity_id), set()).update(
@@ -226,21 +268,64 @@ else:
     assert (pd.to_numeric(reb["rep_secs"]) >= 600).all(), \
         "a rebuilt row under the 10-minute floor"
     assert (reb["reps"] == 1).all()
-    assert classes(filled2) == classes(base[~m_consume]), \
-        "the short side changed beyond the fragments the rebuilds consumed"
+    # the short side moves ONLY where a rebuild touched it: consumed rows
+    # are gone, a trimmed row carries the rep length its survivors make
+    # (the median of the members the run did not take), and every other
+    # row stands as the detector recorded it.
+    exp = base[~m_consume].copy()
+    tr_rows = filled2[filled2["_keep_seqs"].map(
+        lambda t: bool(t) if isinstance(t, (tuple, list)) else False)]
+    for _a, _k, _rs in zip(tr_rows["activity_id"].astype(str),
+                           tr_rows["_key"].astype(str),
+                           pd.to_numeric(tr_rows["rep_secs"],
+                                         errors="coerce")):
+        exp.loc[(exp["activity_id"].astype(str) == _a)
+                & (exp["_key"].astype(str) == _k), "rep_secs"] = _rs
+    assert classes(filled2) == classes(exp), \
+        "the short side changed beyond the consumed fragments and the trims"
     # one ride never reports the same window twice
     both = set(peak2["activity_id"].astype(str)) & set(
         reb["activity_id"].astype(str))
     assert not both, f"{both}: rebuilt AND meter row for the same ride"
 
-    # the two double-count guards, exactly as the meter rows face them
-    for r in reb.itertuples():
-        have = det.get(str(r.activity_id), [])
-        assert not any(abs(x - float(r.rep_secs)) <= 120 for x in have), \
-            f"{r.activity_id}: {r.rep_secs} within 2 min of a detection"
-        assert not any(_dur_label(x) == _dur_label(r.rep_secs)
-                       for x in have), \
-            f"{r.activity_id}: {r.rep_secs} in a detected class"
+    # one ride never reports the same PEDALING twice — by membership, not
+    # by length: a stitched 15-minute rep may legitimately read like a
+    # detected 15-minute row when their rows are disjoint (17 Apr 2026:
+    # the stitched 911-s window and the detected 915-s one share no
+    # seq), so the seconds may not decide. Each surviving detector row
+    # states what it still claims — a trimmed row its survivors
+    # (_keep_seqs), an untouched row every member its group owns,
+    # resolved from the cache by the set's own key.
+    wq = iv[iv["iv_type"].astype(str).str.upper() == "WORK"]
+    grp = {}
+    for _a, _g, _q in zip(wq["activity_id"].astype(str),
+                          wq["group_id"].astype("string"),
+                          pd.to_numeric(wq["seq"], errors="coerce")):
+        if np.isfinite(_q) and pd.notna(_g):
+            grp.setdefault((_a, str(_g)), set()).add(float(_q))
+
+    def _claims(a, key, keep):
+        if isinstance(keep, (tuple, list)) and len(keep):
+            return {float(x) for x in keep}
+        mem = grp.get((a, key))
+        if mem:
+            return set(mem)
+        if key.startswith("solo:"):
+            try:
+                return {float(key.rsplit(":", 1)[1])}
+            except ValueError:
+                return set()
+        return set()
+
+    for _a, _k, _ks in zip(det2["activity_id"].astype(str),
+                           det2["_key"].astype(str),
+                           det2["_keep_seqs"]):
+        if _a not in run_of:
+            continue
+        hit = _claims(_a, _k, _ks) & run_of[_a]
+        assert not hit, \
+            f"{_a} {_k}: still claims the charted rows {sorted(hit)}"
+    print("   PASS  no surviving detector row claims a row a rebuild charts")
     # and a rebuilt row must reproduce the window that vouched for it
     from ml.interval_watts import REBUILD_W_TOL, rebuilt_efforts
     vouch = rebuilt_efforts(iv, df)
@@ -256,8 +341,8 @@ else:
         assert abs(r.secs - r.peak_s) <= 0.15 * r.peak_s, \
             (r.activity_id, r.secs, r.peak_s)
     print(f"   PASS  rebuild: {len(reb)} whole effort(s) with the meter "
-          f"window replaced, {n_consumed} fragment set(s) consumed, guards "
-          f"and short side unchanged")
+          f"window replaced, {n_consumed} fragment set(s) consumed, "
+          f"{len(tr_rows)} split set(s) trimmed, short side honest")
 
     # the Set-evolution tab runs the quality screen AFTER the fill; a rebuild
     # that the screen then deleted would never reach the reader

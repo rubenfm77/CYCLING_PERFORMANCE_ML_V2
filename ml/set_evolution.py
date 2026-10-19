@@ -300,6 +300,104 @@ def is_spanned(meter_s, det_secs) -> bool:
     return m > vals[-1] * SPAN_MARGIN
 
 
+def _trimmed_members(act_rows: pd.DataFrame, keep) -> dict | None:
+    """Recompute ONE set row from only the member rows that survive a run.
+
+    A set whose members are split across a fired run and the open road used
+    to survive WHOLE: its inside members were then counted twice — once as
+    part of the rebuilt run in the long class, again inside the set under a
+    short class. The row is instead rewritten from the SURVIVING members
+    alone, with build_sets' own aggregation semantics: reps = size,
+    rep_secs = median of the member seconds, watts / HR / IF / cadence /
+    decoupling / ss fields = mean, load = sum (all-NaN sums to 0.0, as the
+    groupby does), first/last = min/max seq.
+
+    `rest` is measured the way build_sets measures it: the median over
+    per-gap recovery time between two CONSECUTIVE members, where a
+    RECOVERY row counts only when the nearest chartable WORK row on both
+    sides is a SURVIVING member — so recovery around a consumed member is
+    never reported as this set's rest.
+
+    `act_rows` is that one activity's interval rows, sorted by seq. Returns
+    None when no surviving member is chartable (nothing left to draw), so
+    the caller can drop the row instead of writing a zero-rep set.
+    """
+    seq = pd.to_numeric(act_rows["seq"], errors="coerce")
+    kind = act_rows["iv_type"].astype(str)
+    avg = pd.to_numeric(act_rows["avg_w"], errors="coerce") \
+        if "avg_w" in act_rows.columns else pd.Series(np.nan, index=act_rows.index)
+    secs_all = pd.to_numeric(act_rows["secs"], errors="coerce")
+    # build_sets' own row filter: dropna(date, secs, avg_w), avg_w > 0.
+    chartable = (secs_all.notna() & avg.notna() & (avg > 0))
+    if "date" in act_rows.columns:
+        chartable &= act_rows["date"].notna()
+
+    keepset = {float(x) for x in keep}
+    wmask = (kind == "WORK") & seq.isin(keepset) & chartable
+    w = act_rows[wmask]
+    if not len(w):
+        return None                      # nothing of this set can be charted
+    secs = pd.to_numeric(w["secs"], errors="coerce")
+
+    def _mean(col):
+        if col not in act_rows.columns:
+            return np.nan
+        v = pd.to_numeric(w[col], errors="coerce")
+        return float(v.mean()) if v.notna().any() else np.nan
+
+    if "load" in act_rows.columns:
+        _load = float(pd.to_numeric(w["load"], errors="coerce").sum())
+    else:
+        _load = np.nan
+    sq = pd.to_numeric(w["seq"], errors="coerce")
+    st = {
+        "reps": int(len(w)),
+        "rep_secs": float(secs.median()),
+        "set_w": _mean("avg_w"),
+        "set_np": _mean("np_w"),
+        "set_hr": _mean("hr_avg"),
+        "intensity": _mean("intensity"),
+        "load": _load,
+        "cad": _mean("cad_avg"),
+        "decoupling": _mean("decoupling"),
+        "first_seq": float(sq.min()),
+        "last_seq": float(sq.max()),
+        "set_ss_cp_w": _mean("ss_cp_w"),
+        "set_ss_w_prime_kj": _mean("ss_w_prime_kj"),
+        "set_w5s_cv": _mean("w5s_cv"),
+        "rest": np.nan,
+    }
+    # Median per-gap recovery between CONSECUTIVE surviving members — the
+    # same prev==next key rule build_sets applies, with the set's own
+    # membership restricted to the survivors.
+    if st["reps"] >= 2:
+        _a_seq = seq.to_numpy(dtype=float)
+        _work_pos = np.flatnonzero(
+            ((kind == "WORK") & chartable).to_numpy())
+        _rec_pos = np.flatnonzero((kind == "RECOVERY").to_numpy())
+        if len(_work_pos) and len(_rec_pos):
+            _chart = np.sort(sq.to_numpy(dtype=float))
+            _kp = np.searchsorted(_work_pos, _rec_pos, side="right") - 1
+            _kn = np.searchsorted(_work_pos, _rec_pos, side="left")
+            _ok = (_kp >= 0) & (_kn < _work_pos.size)
+            _prev = np.where(_ok, _a_seq[_work_pos[
+                np.clip(_kp, 0, _work_pos.size - 1)]], np.nan)
+            _next = np.where(_ok, _a_seq[_work_pos[
+                np.clip(_kn, 0, _work_pos.size - 1)]], np.nan)
+            _rec_s = pd.to_numeric(act_rows["secs"],
+                                   errors="coerce").to_numpy(dtype=float)
+            _hit = (_ok & np.isin(_prev, _chart) & np.isin(_next, _chart))
+            _gaps: dict = {}
+            for _p, _g in zip(_prev[_hit], _rec_s[_rec_pos][_hit]):
+                if np.isfinite(_p):
+                    _gaps[float(_p)] = (_gaps.get(float(_p), 0.0)
+                                        + (float(_g) if np.isfinite(_g)
+                                           else 0.0))
+            if _gaps:
+                st["rest"] = float(np.median(list(_gaps.values())))
+    return st
+
+
 def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
                       min_s: float = PEAK_MIN_S,
                       near_s: float = PEAK_NEAR_S,
@@ -406,10 +504,19 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
         # whichever source speaks, one effort is still never counted twice.
         hits = reb_by.get(raw) if raw else None
         if hits is not None and len(hits):
-            kept = [q for q in hits.itertuples(index=False)
-                    if not any(abs(x - float(q.secs)) <= near_s for x in have)
-                    and not any(_dur_label(x) == _dur_label(q.secs)
-                                for x in have)]
+            # A rebuilt run has already been screened against the detector
+            # WHERE IT WAS BUILT (rebuilt_efforts): it may not read the
+            # length of a detected effort it does not contain, and the
+            # fragments it does contain are exactly the sets the global drop
+            # below removes once the run is admitted. The two length guards
+            # a meter reading still has to clear cannot be reused here —
+            # they compare lengths only, and two genuinely separate reps can
+            # share one length: on 29 Apr 2026 the stitched 15-minute rep
+            # and the ride's real third rep both read 915 s, and this
+            # screen alone kept the shredded version (124 s + 756 s) on the
+            # chart. A meter reading carries no seqs, so it keeps both
+            # guards below — one effort is still never counted twice.
+            kept = list(hits.itertuples(index=False))
             if kept:
                 for q in kept:
                     # Which detector rows this run was joined from (its seq
@@ -465,15 +572,24 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
 
     if "run_seqs" not in src.columns:
         src = src.assign(run_seqs=[tuple()] * len(src))
+    if "_keep_seqs" not in src.columns:
+        # The member seqs a TRIMMED set row now stands for (empty = the row
+        # still owns every member it was built from). An audit trail: a
+        # reader can verify no consumed seq is claimed by any surviving set.
+        src = src.assign(_keep_seqs=[tuple()] * len(src))
     add = pd.DataFrame(rows).reindex(columns=list(src.columns))
     out = pd.concat([src, add], ignore_index=True, sort=False)
     # A rebuilt run replaces its fragments EVERYWHERE, not only in the chart
     # that drew it. The set rows those fragments formed (a detector-shredded
     # interval files as sets of two or three blips) would otherwise keep
     # counting the same effort a second time — once as the whole run in its
-    # class, again as the blips under other rep lengths. A set falls only
-    # when EVERY row it owns is inside the run's seqs; a set touching any
-    # row outside the run is a different effort and stays as recorded.
+    # class, again as the blips under other rep lengths. Membership decides,
+    # per row: every member inside the runs -> the set FALLS; SOME members
+    # inside -> the set is TRIMMED to the members that survived, rewritten
+    # from them alone (never left whole holding a consumed member); no
+    # member inside -> it is a different effort and stays as recorded. The
+    # two-endpoint rule stays as the fallback for keys the cache cannot
+    # resolve.
     if len(out) and "first_seq" in out.columns and "Source" in out.columns:
         _repl: dict = {}
         for r in add.itertuples(index=False):
@@ -487,15 +603,91 @@ def fill_peak_efforts(sets: pd.DataFrame, df_all=None,
                     _repl.setdefault(str(getattr(r, "activity_id", "")),
                                      set()).update(_sq)
         if _repl:
+            # Which WORK rows each detector set owns, looked up from the
+            # cache by the set's own key. A set falls when EVERY row it
+            # owns sits inside the fired runs of its activity -- even when
+            # two runs split its rows between them: on 17 Jun 2026 the
+            # detector's "165 s" set owned rows 11, 19 and 21, and the two
+            # stitched 12-minute efforts took exactly those rows, so
+            # keeping the set would have charted the same pedaling twice --
+            # once as the whole runs, again as three blips under a short
+            # class. first_seq/last_seq alone cannot see that (row 21 is
+            # outside the first run, row 11 outside the second), so the
+            # set's own membership decides, and the two-endpoint rule
+            # stays as the fallback for keys the cache cannot resolve.
+            _grp: dict = {}
+            if iv is not None and len(iv) and "seq" in iv.columns \
+                    and "group_id" in iv.columns:
+                _wq = iv[iv["iv_type"].astype(str).str.upper() == "WORK"]
+                _qs = pd.to_numeric(_wq["seq"], errors="coerce")
+                for _a, _g, _q in zip(_wq["activity_id"].astype(str),
+                                      _wq["group_id"].astype("string"), _qs):
+                    if np.isfinite(_q) and pd.notna(_g):
+                        _grp.setdefault((_a, str(_g)), set()).add(float(_q))
             _fs = pd.to_numeric(out["first_seq"], errors="coerce")
             _ls = pd.to_numeric(out["last_seq"], errors="coerce")
-            _drop = np.fromiter(
-                ((_a in _repl and np.isfinite(f) and np.isfinite(l)
-                  and f in _repl[_a] and l in _repl[_a])
-                 for _a, f, l in zip(out["activity_id"].astype(str),
-                                     _fs, _ls)),
-                dtype=bool, count=len(out))
-            out = out[~_drop]
+            _acts = out["activity_id"].astype(str)
+            _keys = (out["_key"].astype(str) if "_key" in out.columns
+                     else pd.Series([""] * len(out)))
+            _drop_lab: list = []
+            _trims: dict = {}
+            for _p, (_a, _k, _f, _l) in enumerate(
+                    zip(_acts, _keys, _fs, _ls)):
+                _mem = _grp.get((_a, _k)) if _k not in ("", "nan") else None
+                if _mem:
+                    _in = (_mem & _repl[_a]) if _a in _repl else set()
+                    if _in and not (_mem - _repl.get(_a, set())):
+                        _drop_lab.append(out.index[_p])   # wholly consumed
+                    elif _in:
+                        # PARTIAL: some members live on inside the run. The
+                        # row is rewritten from the survivors only — a set
+                        # kept whole here would chart its consumed members a
+                        # second time under the short class.
+                        _trims[out.index[_p]] = (_a,
+                                                 sorted(_mem - _repl[_a]))
+                    # no member inside: the set stands as recorded
+                    continue
+                if (_a in _repl and np.isfinite(_f) and np.isfinite(_l)
+                        and _f in _repl[_a] and _l in _repl[_a]):
+                    _drop_lab.append(out.index[_p])   # endpoint fallback
+            if _trims:
+                _rcache: dict = {}
+                for _lab, (_a, _keep) in _trims.items():
+                    if _a not in _rcache:
+                        _sl = iv[iv["activity_id"].astype(str) == _a]
+                        _rcache[_a] = (_sl.sort_values("seq", kind="stable")
+                                       if len(_sl) else None)
+                    _ar = _rcache.get(_a)
+                    if _ar is None:
+                        continue
+                    _st = _trimmed_members(_ar, _keep)
+                    if not _st or int(_st.get("reps", 0)) <= 0:
+                        _drop_lab.append(_lab)   # nothing chartable left
+                        continue
+                    for _c, _v in _st.items():
+                        if _c in out.columns:
+                            out.at[_lab, _c] = _v
+                    if "_keep_seqs" in out.columns:
+                        out.at[_lab, "_keep_seqs"] = tuple(
+                            float(x) for x in _keep)
+                    # fill runs before add_signatures on some pages and
+                    # after it on others, so when the signature columns are
+                    # present they are recomputed for the row AS IT NOW
+                    # STANDS — same formulas as add_signatures.
+                    if "sig" in out.columns:
+                        _rs, _rn = float(_st["rep_secs"]), int(_st["reps"])
+                        if np.isfinite(_rs):
+                            _rbk = _bucket(_rs, 5 if _rs <= 90 else 10)
+                            _nbk = _rn if _rn <= 10 else _bucket(_rn, 5)
+                            out.at[_lab, "rep_b"] = _rbk
+                            out.at[_lab, "reps_b"] = _nbk
+                            out.at[_lab, "sig"] = _sig_label(_nbk, _rbk)
+                            _dbv = (str(out.at[_lab, "db_type"]).strip()
+                                    if "db_type" in out.columns else "")
+                            out.at[_lab, "style"] = _style(
+                                _rs, _rn, _st["rest"], _dbv)
+            if _drop_lab:
+                out = out.drop(index=_drop_lab)
     return _with_context(out, df_all), len(rows)
 
 

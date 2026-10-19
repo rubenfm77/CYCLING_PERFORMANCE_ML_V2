@@ -993,6 +993,10 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
         # ("_seq" arrives as "_4"), so the sequence number travels bare.
         "oseq": (pd.to_numeric(iv["seq"], errors="coerce")
                  if "seq" in iv.columns else np.arange(len(iv))),
+        # The set the detector filed each row under: the set-aware screen
+        # below subtracts the run's OWN fragments (all of a set's WORK rows
+        # inside the run) before comparing lengths.
+        "group_id": (iv["group_id"] if "group_id" in iv.columns else np.nan),
     })
 
     rows = []
@@ -1003,28 +1007,68 @@ def rebuilt_efforts(iv: pd.DataFrame, df_all=None) -> pd.DataFrame:
         g = g.sort_values("oseq", kind="stable")
         window = float(p.pk_s)
         work = g.loc[g["iv_type"].str.upper() == "WORK", "secs"].dropna()
-        # The anchor: where the detector already reports an effort of about
-        # the window's LENGTH (±2 minutes), it told this story whole and
-        # nothing is rebuilt. A mere class match is NOT enough: a 683-second
-        # fragment shares the 21:00 window's class without being the effort,
-        # and anchoring on it both blocked the rebuild and let the meter row
-        # draw on top of its own fragment (04 Jul 2026 drew 683 s + 1260 s
-        # for one 20-minute effort). Same ±2 minutes the peak fill uses, so
-        # the two guards can never disagree about one session.
-        if len(work) and bool((np.abs(work.values - window)
-                               <= REBUILD_NEAR_S).any()):
-            continue
+        # WORK rows with their set key (group_id = the set the detector filed
+        # them under — the same key build_sets groups on) and their seq, for
+        # the set-aware screen inside the run loop.
+        _wsr = g[g["iv_type"].str.upper() == "WORK"].copy()
+        if "group_id" in _wsr.columns and bool(_wsr["group_id"].notna().any()):
+            _sqv = pd.to_numeric(_wsr["oseq"], errors="coerce")
+            _wsr["_grp"] = (_wsr["group_id"]
+                            .where(_wsr["group_id"].notna(),
+                                   "__seq:" + _sqv.astype(str)))
         for run in _iv_runs(g):
             s, w, pk_s, pk_w = run["secs"], run["w"], float(p.pk_s), float(p.pk_w)
             work_s = float(run.get("work_secs") or s)
             if s < REBUILD_MIN_S:
                 continue
+            # A rebuild REBUILDS: it puts back together pieces the detector
+            # filed apart. A run of one part is the detector's own row,
+            # whole as filed — relabelling it "rebuilt" would misstate its
+            # provenance and, worse, make the global drop consume the
+            # detected set it is, replacing a recorded effort with a copy of
+            # itself. Only stitched runs (two parts or more) qualify.
+            if len(run["parts"]) < 2:
+                continue
             if abs(s - pk_s) > REBUILD_LEN_TOL * pk_s:
                 continue
             if abs(w - pk_w) > REBUILD_W_TOL * pk_w:
                 continue
-            if len(work) and bool((np.abs(work.values - s)
-                                   <= REBUILD_NEAR_S).any()):
+            # The near-length screen, made SET-aware. A detector set the run
+            # CONTAINS (every one of its WORK rows inside the run) is one of
+            # this run's own pieces — the very shred being repaired — so it
+            # is subtracted before the comparison. A set with NO row inside
+            # the run is a different effort: it cannot be this effort's
+            # whole-effort report, because such a report would have to be
+            # built from the very rows the run was built from. Only a set
+            # that STRADDLES the run (some of its rows inside, some outside)
+            # stays ambiguous and keeps blocking at a near length, exactly
+            # as before. The old row-length screen could not tell these
+            # apart, and a stitched rep could therefore never come back
+            # whenever one of its pieces read close to the whole: on 29 Apr
+            # 2026 the 15-minute rep the detector cut into 124 s + 756 s
+            # rebuilt to 915 s and was refused twice over — the ride's real
+            # third rep also read 915 s, and its set (911 s + 915 s under one
+            # group key) even spanned the shredded region. Two genuinely
+            # separate efforts, one length. The blanket that used to guard
+            # this ride's meter window (skip the activity when any detected
+            # length read within ±2 min of the window) went with it: it
+            # killed the repair of a DIFFERENT effort on the same ride, and
+            # the per-run window tolerance plus this screen now cover what it
+            # guarded. A bare frame without set keys keeps the old row-length
+            # screen, so nothing that used to pass changes shape.
+            _rs = set(run["seqs"])
+            _comp = work
+            if _rs and "_grp" in _wsr.columns:
+                _in = pd.to_numeric(_wsr["oseq"], errors="coerce").isin(_rs)
+                _gi = (_wsr.assign(_in=_in.values)
+                       .groupby("_grp", sort=False)["_in"].agg(["any", "all"]))
+                _strad = _gi[_gi["any"] & ~_gi["all"]].index
+                _comp = (pd.to_numeric(_wsr.loc[_wsr["_grp"].isin(_strad),
+                                                "secs"],
+                                       errors="coerce").dropna()
+                         if len(_strad) else pd.Series(dtype=float))
+            if len(_comp) and bool((np.abs(_comp.values - s)
+                                    <= REBUILD_NEAR_S).any()):
                 continue
             rows.append({
                 "activity_id": str(p.activity_id),
