@@ -195,13 +195,16 @@ def _match_type(row) -> str:
 def _fetch_event_labels(days_back: int = 60) -> tuple[dict, dict]:
     """Calendar-event training-type labels from intervals.icu.
 
-    Returns ({activity id: label}, {date: label}) — the athlete's OWN planned
-    workout name per ride. The first map is the explicit pairing a ride carries
-    via `paired_event_id` (the strongest non-Description signal there is: the
-    athlete linked that ride to that planned session). The second is a plain
-    date map of every planned workout in the window, used only as a LAST
-    resort after the content-based auto rules, so a session ridden on a
-    different day than planned is never labelled by the wrong day's plan.
+    Returns ({id: label}, {date: label}) — the athlete's OWN planned workout
+    name per ride. The first map is the explicit pairing a ride carries with
+    its planned session (the strongest non-Description signal there is: the
+    athlete linked that ride to that plan). The link is stored on one side or
+    the other — the activity holds `paired_event_id`, the event holds
+    `paired_activity_id` — so BOTH ids are keyed here and the caller looks a
+    ride up by whichever side it carries. The second map is a plain date map
+    of every planned workout in the window, used only as a LAST resort after
+    the content-based auto rules, so a session ridden on a different day than
+    planned is never labelled by the wrong day's plan.
 
     Only names that resolve to a known training type are kept (a planned
     "RACE" or "REST" stays blank rather than inventing a label). Any failure
@@ -238,6 +241,12 @@ def _fetch_event_labels(days_back: int = 60) -> tuple[dict, dict]:
         eid = e.get("id")
         if eid is not None:
             by_id[str(eid)] = lab
+        # The activity side of the link: a ride paired to this event can then
+        # be found by its own activity id even when the event id lives only on
+        # the ride's `paired_event_id` field.
+        paid = e.get("paired_activity_id")
+        if paid:
+            by_id[str(paid)] = lab
         d = e.get("start_date_local") or e.get("start_date")
         if d:
             by_date[str(d)[:10]] = lab
@@ -317,12 +326,32 @@ def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     # The EXPLICIT pairing (a ride linked to its planned calendar workout) is
     # trusted exactly like a typed Description — it is the athlete's own label,
     # just stored on the event instead of the activity. It fills only what the
-    # Description left blank.
-    _pair_lab = df["id"].astype(str).map(_pair_label) \
-        if "id" in df.columns else pd.Series(None, index=df.index)
+    # Description left blank. Two details make this lookup actually fire:
+    #   * `.map()` answers a miss with NaN, and `NaN if NaN else ...` would
+    #     KEEP the NaN (float NaN is truthy in Python) instead of falling
+    #     through — every unlabelled API row came back NaN rather than "—",
+    #     which also starved the calendar fill in load_data (it matches on
+    #     "—"). Misses are normalised to None before the chain;
+    #   * the ride is looked up by BOTH sides of the link — its activity id
+    #     (against the event's `paired_activity_id`, keyed above) and its own
+    #     `paired_event_id` (against the event id) — because intervals.icu
+    #     stores the pairing on one side or the other.
+    def _lab_or_none(v):
+        return v if isinstance(v, str) and v.strip() else None
+
+    _pair_lab = (df["id"].astype(str).map(_pair_label)
+                 if "id" in df.columns
+                 else pd.Series(pd.NA, index=df.index, dtype=object))
+    if "paired_event_id" in df.columns:
+        _ped = pd.to_numeric(df["paired_event_id"], errors="coerce")
+        _ped_lab = _ped.map(lambda v: _pair_label.get(str(int(v)))
+                            if pd.notna(v) else None)
+        _pair_lab = _pair_lab.where(_pair_lab.notna(), _ped_lab)
     df["training_type"] = [
         d if d else (p if p else (m if m != "—" else "—"))
-        for d, p, m in zip(_desc_lab, _pair_lab, df.apply(_match_type, axis=1))
+        for d, p, m in zip((_lab_or_none(v) for v in _desc_lab),
+                           (_lab_or_none(v) for v in _pair_lab),
+                           df.apply(_match_type, axis=1))
     ]
     # Publish the date→event map for the LAST-resort fill in load_data (after
     # the auto rules), so a plan written on the wrong day never outranks
@@ -709,8 +738,13 @@ def load_data() -> pd.DataFrame:
     # already claimed that row, so it is no longer blank here).
     _ev_by_date = _EVENT_BY_DATE or {}
     if _ev_by_date and "date" in df.columns:
-        _still_blank2 = (df["training_type"].astype(str).str.strip() == "—") \
-            & _is_ride
+        # Blank means blank in ANY spelling the frame can hold: NaN (a CSV row
+        # with no label), "—" (the API's own no-match answer) or the other
+        # empty tokens — matching only on "—" silently skipped every NaN row.
+        _tt_now = df["training_type"]
+        _still_blank2 = (_tt_now.isna()
+                         | _tt_now.astype(str).str.strip()
+                         .isin(BLANK_TYPE_TOKENS)) & _is_ride
         _dstr = df["date"].dt.strftime("%Y-%m-%d") \
             if hasattr(df["date"], "dt") else df["date"].astype(str).str[:10]
         _m_event = _still_blank2 & _dstr.map(_ev_by_date).notna()

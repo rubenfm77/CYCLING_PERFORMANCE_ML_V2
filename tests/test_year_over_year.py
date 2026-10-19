@@ -146,7 +146,14 @@ assert not g["can_compare_years"], \
 assert 2025 not in g["comparable_years"], \
     "2025 was called comparable on 3 readings inside one December week"
 assert g["first_month"] == "2025-12", f"window starts {g['first_month']}"
-assert g["n_months"] <= 10, "the threshold window has grown beyond Dec 2025"
+# The window may only stretch as far as the calendar allows: from the fixed
+# start (asserted above) to this month, inclusive. The old bound was a
+# snapshot (<= 10 months, written in September) and turned into a false
+# failure every month that passed; the claim is "nothing before Dec 2025",
+# and elapsed months is what makes the bound live.
+_now = pd.Timestamp.now()
+_elapsed = (_now.year - 2025) * 12 + (_now.month - 12) + 1
+assert g["n_months"] <= _elapsed, "the threshold window has grown beyond Dec 2025"
 print("gate refuses the comparison and explains why: OK")
 
 print("\nAll year-over-year evolution checks passed.")
