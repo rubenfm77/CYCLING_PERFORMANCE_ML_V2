@@ -528,6 +528,25 @@ def _tok(v, unit: str = "", fmt: str = "{:.0f}") -> str:
     return fmt.format(x) + unit if np.isfinite(x) else "—"
 
 
+def _rep_change_caption(flags: list, sess: pd.DataFrame) -> str:
+    """The shared 'rep-length change' caption — horizontal, ABOVE the chart.
+
+    Both charts of this section print it verbatim: the per-interval bars and
+    the session-average trend cross the same prescription change (30 s →
+    45 s), and each chart must say where the boundary is and what length
+    sits on each side of it. No rotated in-figure text — on a many-session
+    series it was unreadable (the athlete's report).
+    """
+    return (
+        "**Rep-length change** (dashed line): "
+        + "; ".join(
+            f"{pd.Timestamp(sess['date'].iloc[i]).strftime('%d %b %Y')} "
+            f"typical rep {fmt_min(p)} → {fmt_min(c)}"
+            for i, p, c in flags)
+        + ". Same duration class, different rep length — read each "
+          "side of the line at its own rep length.")
+
+
 def _rep_bar_figure(pv: dict, rep_flags: list | None = None) -> go.Figure:
     """One bar per individual interval; bars are grouped into one slot per
     session, with that session's average watts marked. No smoothing, no
@@ -628,10 +647,19 @@ def _rep_bar_figure(pv: dict, rep_flags: list | None = None) -> go.Figure:
 
 
 # ── session-average line + robust trend + bootstrap CI band ─────────────────
-def _session_trend_figure(pv: dict, on_temp: bool, on_tsb: bool) -> go.Figure:
+def _session_trend_figure(pv: dict, on_temp: bool, on_tsb: bool,
+                          rep_flags: list | None = None) -> go.Figure:
     """One point per session = that session's average watts. Trend = Theil–Sen
     (robust to a single all-out session), shaded with its bootstrap 95 % CI.
-    The line is only drawn when the data can support it."""
+    The line is only drawn when the data can support it.
+
+    `rep_flags` (slot index, previous rep s, current rep s) — the same
+    boundaries the per-interval chart flags — are drawn as dashed verticals
+    HERE too: the session average itself can step at a prescription's
+    rep-length change (30 s → 45 s), so without the line this trend reads as
+    one continuous series across two different exercises. The boundary sits
+    at the midpoint between the two sessions in calendar time.
+    """
     sess = pv["sessions"]
     tr = pv.get("trend") or {}
     slope = tr.get("slope_robust", np.nan)
@@ -690,6 +718,17 @@ def _session_trend_figure(pv: dict, on_temp: bool, on_tsb: bool) -> go.Figure:
     if y2:
         fig.update_layout(yaxis2=dict(overlaying="y", side="right",
                                       showgrid=False))
+    # Rep-length boundary: the same dashed marking as the per-interval chart,
+    # placed at the calendar midpoint between the two sessions so it sits in
+    # the gap, never on a point. The text lives in the caption above the
+    # chart, never rotated inside it.
+    _dates = list(sess["date"])
+    for _i, _prev, _cur in (rep_flags or []):
+        if not (0 < _i < len(_dates)):
+            continue
+        _d0, _d1 = pd.Timestamp(_dates[_i - 1]), pd.Timestamp(_dates[_i])
+        fig.add_vline(x=_d0 + (_d1 - _d0) / 2, line_dash="dash",
+                      line_width=1.5, line_color=C["yellow"])
     return fig
 
 
@@ -999,6 +1038,43 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                     else "warn" if not np.isnan(fade) else None,
                     accent=C["purple"])
 
+    # ── rep-length change flags — computed ONCE for both charts below ─────
+    # When the prescription's rep length shifts (30 s → 45 s on 16 Oct) the
+    # bars stay in the same band, so both halves would otherwise read as one
+    # continuous run of reps and neither could be analysed at its own length.
+    # Material = ≥ 10 s from the previous session's rep.
+    # The length quoted is the MEDIAN of that session's recorded reps —
+    # the typical rep — because one early-stopped rep must not drag the
+    # label: 16 Oct's 24 recorded reps read 39–50 s around a 44 s
+    # median, while the mean printed "42 s" for a session the athlete
+    # rode at 45 s. The median is a length the session actually holds.
+    # Hoisted out of the per-interval chart: the session-average trend below
+    # crosses the same boundary and must flag it too, even when the raw
+    # interval rows are absent from the cache (the secs_mean fallback then).
+    _sd = pd.to_datetime(pv["sessions"]["date"]).dt.normalize()
+    _sm = None
+    _b = pv.get("bars")
+    if (_b is not None and len(_b) and "secs" in _b.columns
+            and "date" in _b.columns):
+        _med = (_b.assign(_bd=pd.to_datetime(_b["date"]).dt.normalize())
+                .groupby("_bd")["secs"].median())
+        _sm = _med.reindex(_sd).to_numpy(dtype=float)
+    if _sm is None or not len(_sm) or not np.isfinite(_sm).any():
+        _sm = (pd.to_numeric(pv["sessions"]["secs_mean"],
+                             errors="coerce").to_numpy()
+               if "secs_mean" in pv["sessions"].columns
+               else np.array([]))
+    else:
+        # a session with no member bar (a solo set) still compares with
+        # its neighbours through the set-level mean
+        _fb = pd.to_numeric(pv["sessions"]["secs_mean"],
+                            errors="coerce").to_numpy()
+        _sm = np.where(np.isfinite(_sm), _sm, _fb)
+    _flags = [(i, float(_sm[i - 1]), float(_sm[i]))
+              for i in range(1, len(_sm))
+              if np.isfinite(_sm[i]) and np.isfinite(_sm[i - 1])
+              and abs(float(_sm[i]) - float(_sm[i - 1])) >= 10.0]
+
     # 4a — every individual interval, one bar each, grouped per session
     if len(bars):
         # which instrument reported each bar, stated before the chart uses it
@@ -1033,51 +1109,11 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
                        "These are single efforts, so there is no within-set "
                        "fade to read — the dotted line is just that day's "
                        "effort:"))
-        # Flag rep-length changes inside this one duration class: when the
-        # prescription's rep length shifts (30 s → 45 s on 16 Oct) the bars
-        # stay in the same band, so both halves would otherwise read as one
-        # continuous run of reps and neither could be analysed at its own
-        # length. Material = ≥ 10 s from the previous session's rep.
-        # The length quoted is the MEDIAN of that session's recorded reps —
-        # the typical rep — because one early-stopped rep must not drag the
-        # label: 16 Oct's 24 recorded reps read 39–50 s around a 44 s
-        # median, while the mean printed "42 s" for a session the athlete
-        # rode at 45 s. The median is a length the session actually holds.
-        _sd = pd.to_datetime(pv["sessions"]["date"]).dt.normalize()
-        _sm = None
-        _b = pv.get("bars")
-        if (_b is not None and len(_b) and "secs" in _b.columns
-                and "date" in _b.columns):
-            _med = (_b.assign(_bd=pd.to_datetime(_b["date"]).dt.normalize())
-                    .groupby("_bd")["secs"].median())
-            _sm = _med.reindex(_sd).to_numpy(dtype=float)
-        if _sm is None or not len(_sm) or not np.isfinite(_sm).any():
-            _sm = (pd.to_numeric(pv["sessions"]["secs_mean"],
-                                 errors="coerce").to_numpy()
-                   if "secs_mean" in pv["sessions"].columns
-                   else np.array([]))
-        else:
-            # a session with no member bar (a solo set) still compares with
-            # its neighbours through the set-level mean
-            _fb = pd.to_numeric(pv["sessions"]["secs_mean"],
-                                errors="coerce").to_numpy()
-            _sm = np.where(np.isfinite(_sm), _sm, _fb)
-        _flags = [(i, float(_sm[i - 1]), float(_sm[i]))
-                  for i in range(1, len(_sm))
-                  if np.isfinite(_sm[i]) and np.isfinite(_sm[i - 1])
-                  and abs(float(_sm[i]) - float(_sm[i - 1])) >= 10.0]
         # The caption sits ABOVE the chart, horizontal: rotated in-figure
         # labels were unreadable on a many-session series (the athlete's
         # report), and the change must stay readable at any series length.
         if _flags:
-            st.caption(
-                "**Rep-length change** (dashed line): "
-                + "; ".join(
-                    f"{pd.Timestamp(pv['sessions']['date'].iloc[i]).strftime('%d %b %Y')} "
-                    f"typical rep {fmt_min(p)} → {fmt_min(c)}"
-                    for i, p, c in _flags)
-                + ". Same duration class, different rep length — read each "
-                  "side of the line at its own rep length.")
+            st.caption(_rep_change_caption(_flags, pv["sessions"]))
         fig = _rep_bar_figure(pv, _flags)
         style_figure(
             fig,
@@ -1098,6 +1134,16 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     # 4b — session average over time + robust trend + CI band
     st.markdown("**Session average watts over time — one point per session, "
                 "robust trend with its 95% CI:**")
+    # The SAME boundary the bars chart flags crosses this trend too: a step
+    # at the dashed line can be the rep-length change itself (30 s → 45 s),
+    # so the caption must say so before the trend reading below claims a
+    # change over time. Caption above, horizontal — never rotated in-figure.
+    if _flags:
+        st.caption(
+            _rep_change_caption(_flags, pv["sessions"])
+            + " A step in the average or trend at the line can be that rep "
+              "change itself — read each side at its own rep length rather "
+              "than as one continuous series.")
     cb = st.columns(2)
     with cb[0]:
         on_temp = st.checkbox("Overlay temperature (right axis)",
@@ -1105,7 +1151,7 @@ def _render_types(iv_full: pd.DataFrame, acts: pd.DataFrame, df_all) -> None:
     with cb[1]:
         on_tsb = st.checkbox("Overlay TSB freshness — CTL − ATL (right axis)",
                              key="iv_type_tsb")
-    fig = _session_trend_figure(pv, on_temp, on_tsb)
+    fig = _session_trend_figure(pv, on_temp, on_tsb, _flags)
     style_figure(
         fig,
         f"{fam_name} · {cls} — session average watts, "

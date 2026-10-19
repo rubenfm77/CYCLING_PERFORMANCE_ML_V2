@@ -158,6 +158,38 @@ assert dia.marker.size >= 14 and dia.marker.line.width >= 2, "too small"
 print("\nsession-average marker: mode=%s size=%s ring=%s labels=%s" % (
     dia.mode, dia.marker.size, dia.marker.line.width, dia.text[:3]))
 
+# ── rep-length boundary: flagged on BOTH charts, words in the caption ──────
+# The prescription shift (30 s → 45 s) must mark the session-average trend
+# too, not only the per-interval bars: a step at the line can be the rep
+# change, so the trend needs the same dashed boundary and the same readable
+# caption above it (horizontal — never rotated in-figure text).
+from views.intervals_view import _rep_change_caption  # noqa: E402
+
+_sess = pv["sessions"]
+assert len(_sess) >= 2, "need at least two sessions to place a boundary"
+_flags_demo = [(1, 29.0, 44.0)]
+ft = _session_trend_figure(pv, False, False, _flags_demo)
+shapes = list(ft.layout.shapes or [])
+assert len(shapes) == 1, \
+    f"the trend must draw the rep-length boundary, got {len(shapes)} shape(s)"
+assert shapes[0].line.dash == "dash", "the boundary must be dashed"
+_x = pd.Timestamp(shapes[0].x0)
+_d0 = pd.Timestamp(_sess["date"].iloc[0])
+_d1 = pd.Timestamp(_sess["date"].iloc[1])
+assert _d0 < _x < _d1, \
+    f"boundary {_x} must sit between the two sessions {_d0}..{_d1}"
+ft0 = _session_trend_figure(pv, False, False)
+assert not list(ft0.layout.shapes or []), \
+    "without flags the trend draws no boundary lines"
+_cap = _rep_change_caption(_flags_demo, _sess)
+_day = pd.Timestamp(_sess["date"].iloc[1]).strftime("%d %b %Y")
+assert _day in _cap, f"caption misses the boundary date: {_cap}"
+assert "29 s" in _cap and "44 s" in _cap, \
+    f"caption must quote both sides' rep lengths: {_cap}"
+assert "\n" not in _cap, "the caption is one horizontal line, no in-figure text"
+print("rep-length boundary: trend vline dash=%s between %s..%s; caption: %s"
+      % (shapes[0].line.dash, _d0.date(), _d1.date(), _cap[:96]))
+
 assert not fails, fails
 print("\nOK — every legend in a margin lane, over no data, and every "
       "session average printed")

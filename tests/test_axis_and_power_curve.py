@@ -33,6 +33,7 @@ components.show = _cap
 
 from core.context import frames            # noqa: E402
 from core.data import load_data            # noqa: E402
+from core.interval_data import PC_WANT     # noqa: E402
 from core.metrics import headline          # noqa: E402
 from ml import interval_watts as iw        # noqa: E402
 import views.fitness as vf                 # noqa: E402
@@ -200,14 +201,26 @@ pc_titles = [t for t in titles[:n_fit] if "power curve" in t.lower()]
 assert pc_titles, "Fitness drew no power curve"
 print("   PASS  Fitness power curve:", pc_titles[0][:64])
 
-# …and its x-axis ticks are the minute labels, not the raw seconds.
+# …and its x-axis ticks follow a sanctioned label rule. The page prints
+# EITHER the house minute labels (its own computed fallback curve) OR the
+# intervals.icu endpoint's canonical labels verbatim when it rendered the
+# fetched mean-maximal frame — that frame's7 points carry its own duration
+# words (tests.test_power_curve_fetch pins them) and house labels would not
+# align with them. Never a raw-seconds tick of a minute or more, either way.
 _pc_fig = FIGS[titles.index(pc_titles[0])]
 _ticks = [str(t) for t in (_pc_fig.layout.xaxis.ticktext or [])]
 assert _ticks, "the power curve has no tick labels"
-assert _ticks == iw.axis_labels(pc["secs"]), (_ticks, iw.axis_labels(pc["secs"]))
+_order = [v for v in PC_WANT.values() if v in set(_ticks)]
+if _ticks == _order and _ticks:
+    print("   PASS  power-curve ticks: the endpoint's own canonical labels "
+          f"(fetched frame): {', '.join(_ticks)}")
+else:
+    assert _ticks == iw.axis_labels(pc["secs"]), \
+        (_ticks, iw.axis_labels(pc["secs"]))
+    print(f"   PASS  power-curve ticks in minutes: {', '.join(_ticks)}")
 assert not [t for t in _ticks if t.endswith("s") and t[:-1].isdigit()
             and float(t[:-1]) >= 60], f"seconds back on the axis: {_ticks}"
-print(f"   PASS  power-curve ticks in minutes: {', '.join(_ticks)}")
+print(f"   PASS  no raw-seconds tick of a minute or more: {', '.join(_ticks)}")
 
 # …and the power-duration law on the Power law page answers to the same rule
 # (it used to print `duration (s)` and a hover of `880 s`).
