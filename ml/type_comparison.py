@@ -264,12 +264,73 @@ def intensity_band(if_pct, secs=None) -> str:
     return "sub-threshold <88%"
 
 
+# ── warm-up ramp screen ──────────────────────────────────────────────────────
+# A single sub-threshold block sitting INSIDE a threshold session is the ramp
+# INTO the work, not one of the intervals. On 17 Apr 2026 the athlete rode
+# 3×20 min at 212–214 W (IF 91–92 %); a 12:11 block at 198 W (IF 85 %) sat
+# after the 5:08 opener. Longer than the 10-minute floor, it crossed into the
+# "10-20 min" class and drew as a FOURTH bar beside the three real intervals.
+# It is not an interval: single block (reps = 1), ridden BELOW the threshold
+# band (IF < 88 %, intervals.icu's own figure), with harder work in the SAME
+# session and SAME length class. Guards keep it honest — a repeated set
+# (reps ≥ 2) is never screened (three 20-min intervals are three intervals),
+# a lone block is never screened (nothing harder beside it = no evidence of a
+# ramp), and only threshold-length classes (≥ 10 min) are considered so a
+# short opener in a 5-min class is untouched. Across the whole 370-day corpus
+# this screens exactly one set (17 Apr 2026). The 10-minute floor mirrors
+# ml.protocol_reps.FAMILY_FLOOR_S["FTP"] = 600 s, duplicated here (not
+# imported) because protocol_reps imports from this module and a cycle would
+# result.
+WARMUP_REASON = ("warm-up ramp — a single sub-threshold block inside a "
+                 "threshold session, not one of its intervals")
+WARMUP_TEXT = ("a single block (reps = 1) ridden below the 88 % IF threshold "
+               "band while the same session holds harder work in the same "
+               "rep-length class: it is the ramp into the intervals, not one "
+               "of them, so it is removed from the series and listed here — "
+               "repeated sets and lone blocks are never screened")
+WARMUP_MIN_S = 600.0        # only threshold-length classes (≥ 10 min)
+
+
+def warmup_ramp_mask(s: pd.DataFrame) -> pd.Series:
+    """Boolean mask of warm-up-ramp sets in `s` (see WARMUP_REASON). Needs
+    family, dur_cls, activity_id, rep_secs, set_w, intensity and reps; the
+    mask is aligned to s.index and is all-False when a column or the FTP
+    family is absent."""
+    if s is None or not len(s) or "family" not in s.columns:
+        return pd.Series(False, index=() if s is None else s.index)
+    idx = s.index
+    for col in ("dur_cls", "activity_id", "rep_secs", "set_w",
+                "intensity", "reps"):
+        if col not in s.columns:
+            return pd.Series(False, index=idx)
+    mask = pd.Series(False, index=idx)
+    rs = pd.to_numeric(s["rep_secs"], errors="coerce")
+    w = pd.to_numeric(s["set_w"], errors="coerce")
+    iff = pd.to_numeric(s["intensity"], errors="coerce")
+    reps = pd.to_numeric(s["reps"], errors="coerce")
+    # Threshold-length FTP blocks only, grouped by session AND length class:
+    # the ramp is judged against the harder work riding in the SAME class.
+    sel = (s["family"] == "FTP") & rs.ge(WARMUP_MIN_S)
+    if not bool(sel.any()):
+        return mask
+    for _, g in s[sel].groupby([s.loc[sel, "activity_id"].astype(str),
+                                s.loc[sel, "dur_cls"]]):
+        gw = w.loc[g.index]
+        for i in g.index:
+            if (reps.loc[i] == 1 and np.isfinite(iff.loc[i])
+                    and iff.loc[i] < IF_THRESHOLD
+                    and bool((gw > w.loc[i]).any())):
+                mask.loc[i] = True
+    return mask
+
+
 def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
     """Add family, duration class, intensity band and series id to a SETS
     table. Data-quality gates run first (ml.set_evolution.quality_gates) —
     duplicate rides and non-protocol groupings are removed here, unreliable
     intensities are flagged, and the audit is attached for the UI."""
-    from ml.set_evolution import quality_gates      # local: avoids a cycle
+    from ml.set_evolution import (quality_gates,      # local: avoids a cycle
+                                 REPORT_COLUMNS)
     clean, report, dropped = quality_gates(sets)
     s = clean
     if not len(s):
@@ -323,6 +384,28 @@ def prep_types(sets: pd.DataFrame) -> pd.DataFrame:
     # page losing every session that did not land on a whole minute.
     s["dur_cls"] = [rep_class(x) for x in
                     pd.to_numeric(s["rep_secs"], errors="coerce")]
+    # Warm-up ramp screen (WARMUP_REASON above): drop the ramp from the
+    # series and REPORT it in the quality audit — never silently. The rows
+    # join `dropped` with a q_why reason and a matching report row, so the
+    # panel lists them exactly like every other exclusion, and because this
+    # runs in prep_types every consumer (summary, family lines, Evolution
+    # day chart, Intervals detail, plan) sees the same cleaned frame.
+    _wu = warmup_ramp_mask(s)
+    if bool(_wu.any()):
+        _wu_rows = s[_wu].copy()
+        _wu_rows["q_why"] = WARMUP_REASON
+        _n_sess = int(pd.to_datetime(_wu_rows["date"]).dt.normalize()
+                      .nunique())
+        dropped = (pd.concat([dropped, _wu_rows], ignore_index=True,
+                             sort=False)
+                   if dropped is not None else _wu_rows.reset_index(drop=True))
+        _row = pd.DataFrame([{"Reason": WARMUP_REASON, "Action": "excluded",
+                              "Sets": int(_wu.sum()), "Sessions": _n_sess,
+                              "What it means": WARMUP_TEXT}],
+                            columns=REPORT_COLUMNS)
+        report = (pd.concat([report, _row], ignore_index=True)
+                  if report is not None else _row)
+        s = s[~_wu].copy()
     flags = (s["q_flag"].fillna("").astype(str)
              if "q_flag" in s.columns else pd.Series("", index=s.index))
     s["if_band"] = [

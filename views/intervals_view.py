@@ -352,7 +352,7 @@ def _family_figure(fam: str, series: list, show_n: int) -> tuple:
 # bodies, so an edit inside ml/type_comparison.py or ml/protocol_reps.py would
 # otherwise keep serving the old numbers for the full TTL. Bump the string
 # whenever those modules change.
-_CODE_TAG = "rep-cls-2026-10-04a"
+_CODE_TAG = "warmup-ramp-2026-10-19a"
 
 
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=8)
