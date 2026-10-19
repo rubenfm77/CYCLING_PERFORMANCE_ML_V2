@@ -253,6 +253,53 @@ def _fetch_event_labels(days_back: int = 60) -> tuple[dict, dict]:
     return by_id, by_date
 
 
+@st.cache_data(ttl=1800)
+def fetch_events_between(date_from: str, date_to: str) -> list | None:
+    """The athlete's calendar events in [date_from, date_to] (YYYY-MM-DD).
+
+    Forward-looking read for the Plan page: the plan the athlete THEMSELVES
+    wrote on their intervals.icu calendar, steps included. Returns the events
+    sorted by date — each {"id", "date", "name", "description",
+    "paired_activity_id"} — an EMPTY list when the window genuinely holds no
+    events, or None when the calendar could not be read (no credentials,
+    network failure), so the page can say "unreadable" instead of quietly
+    showing nothing. Read-only: this page never writes to the calendar.
+    """
+    athlete_id, api_key = _get_api_credentials()
+    if not athlete_id or not api_key:
+        return None
+    try:
+        r = requests.get(
+            f"https://intervals.icu/api/v1/athlete/{athlete_id}/events",
+            auth=("API_KEY", api_key),
+            params={"oldest": f"{date_from}T00:00:00",
+                    "newest": f"{date_to}T23:59:59"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        events = r.json() or []
+    except Exception:
+        return None
+    if not isinstance(events, list):
+        return None
+    out: list = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        d = e.get("start_date_local") or e.get("start_date")
+        if not d:
+            continue
+        out.append({
+            "id": e.get("id"),
+            "date": str(d)[:10],
+            "name": str(e.get("name") or "").strip(),
+            "description": str(e.get("description") or "").strip(),
+            "paired_activity_id": e.get("paired_activity_id"),
+        })
+    out.sort(key=lambda x: (x["date"], x["name"]))
+    return out
+
+
 def _fetch_from_api(days_back: int = 60) -> pd.DataFrame:
     athlete_id, api_key = _get_api_credentials()
     _API_STATUS.update({"attempted": True, "days": days_back,

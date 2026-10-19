@@ -12,6 +12,7 @@ import streamlit as st
 
 from core.components import (callout, dataframe, metric_card, page_header,
                              section)
+from core.data import fetch_events_between
 from core.theme import C
 from ml import interval_watts as iw
 from ml import plan as PL
@@ -95,6 +96,60 @@ def _staple_sessions(refs, ftp):
                  "— no pattern or mix to learn them from"]
 
 
+def _week_days(today) -> list:
+    """Monday..Sunday (dates) of the calendar week containing `today`."""
+    mon = pd.Timestamp(today).normalize() - pd.Timedelta(
+        days=pd.Timestamp(today).dayofweek)
+    return [mon + pd.Timedelta(days=i) for i in range(7)]
+
+
+def _plan_rows(events, days) -> list:
+    """One row per day of `days`, each {"date", "events": [event, …]}.
+
+    Days the calendar leaves alone come back with an empty list — an open
+    day is shown as open, never filled in from anything.
+    """
+    by_date: dict = {}
+    for e in events or []:
+        by_date.setdefault(str(e.get("date")), []).append(e)
+    rows = []
+    for d in days:
+        key = str(pd.Timestamp(d).date()) if not isinstance(d, str) else d
+        rows.append({"date": key, "events": by_date.get(key, [])})
+    return rows
+
+
+def _is_ridden(event, df_all) -> bool:
+    """True when this planned event is linked to an activity already.
+
+    Either side of the intervals.icu pairing counts: the event carrying
+    `paired_activity_id`, or a ride carrying `paired_event_id` for it.
+    """
+    if df_all is None or not len(df_all):
+        return False
+    aid = str(event.get("paired_activity_id") or "").strip()
+    if aid and aid not in ("nan", "None") and "id" in df_all.columns:
+        if aid in set(df_all["id"].astype(str)):
+            return True
+    eid = event.get("id")
+    if eid is None or "paired_event_id" not in df_all.columns:
+        return False
+    ped = pd.to_numeric(df_all["paired_event_id"], errors="coerce").dropna()
+    return str(int(eid)) in set(ped.astype("int64").astype(str))
+
+
+def _split_dated(dated, plan_dates):
+    """Pasteable blocks vs blocks withheld because the calendar plans that day.
+
+    The athlete's own plan always wins over the template: a day their
+    calendar already defines is not a day this page proposes anything for.
+    """
+    keep_dates = {str(d) for d in (plan_dates or set())}
+    paste = [s for s in dated if str(s["date"]) not in keep_dates]
+    held = [s for s in dated if str(s["date"]) in keep_dates]
+    return paste, held
+
+
 def render(head, ctx):
     df_all = ctx.df_all
     page_header(
@@ -144,7 +199,56 @@ def render(head, ctx):
         f"ACWR (7-day vs 28-day load): {_acwr0_txt} "
         f"— cap 1.2 post-surgery, 1.3 otherwise."
     )
-    # ── 2. WHAT SIMILAR WEEKS WERE FOLLOWED BY ────────────────────────────
+
+    # ── 2. THE ATHLETE'S OWN PLAN ─────────────────────────────────────────
+    # What the athlete THEMSELVES planned, straight from their intervals.icu
+    # calendar — shown before any template, because their own plan outranks
+    # everything the data suggests (the same rule the labels follow). Read-
+    # only: this page never writes a workout onto the calendar. One line per
+    # day, steps verbatim from the event; open days stay open.
+    section("🗓️ Your plan, from your intervals.icu calendar")
+    _today0 = pd.Timestamp.now().normalize()
+    _w0 = _week_days(_today0)
+    _w1 = _week_days(_today0 + pd.Timedelta(days=7))
+    _events = fetch_events_between(str(_w0[0].date()), str(_w1[-1].date()))
+    if _events is None:
+        callout("Calendar not read",
+                "Your intervals.icu calendar could not be reached (credentials "
+                "or network). Your plan itself is untouched — this page only "
+                "reads it, never writes, and the templates below are then "
+                "shown WITHOUT knowing your plan.",
+                C["yellow"], icon="⏸️")
+    elif not _events:
+        st.caption(
+            f"No events on your calendar for {_w0[0]:%d %b}–{_w1[-1]:%d %b} — "
+            "both weeks are open, and the templates below are what past weeks "
+            "like this one contained."
+        )
+    else:
+        st.caption(
+            f"Your own calendar, {_w0[0]:%d %b} – {_w1[-1]:%d %b}, read from "
+            "intervals.icu — this page never writes to it. ✓ = linked to a "
+            "ridden activity; days without an event are days you left open. "
+            "Where your plan and a template block below land on the same day, "
+            "your plan wins and the block is withheld."
+        )
+        for _lbl, _wk in (("This week", _w0), ("Next week", _w1)):
+            st.markdown(f"**{_lbl} ({_wk[0]:%d %b}–{_wk[-1]:%d %b})**")
+            for _row in _plan_rows(_events, _wk):
+                _d = pd.Timestamp(_row["date"])
+                if not _row["events"]:
+                    st.markdown(f"- **{_d:%a %d %b}** — open")
+                    continue
+                for _ev in _row["events"]:
+                    _tick = " ✓" if _is_ridden(_ev, df_all) else ""
+                    st.markdown(
+                        f"- **{_d:%a %d %b}** — "
+                        f"{_ev['name'] or 'unnamed event'}{_tick}")
+                    if _ev["description"]:
+                        with st.expander("steps"):
+                            st.code(_ev["description"], language="text")
+
+    # ── 3. WHAT SIMILAR WEEKS WERE FOLLOWED BY ────────────────────────────
     section("🔁 What weeks like this were followed by")
     S, tag, crit = WP.find_similar(W, stt["month"], stt["ctl"], stt["tsb"])
     st.caption(
@@ -177,7 +281,7 @@ def render(head, ctx):
         "file carries eFTP."
     )
 
-    # ── 3. THREE TEMPLATES ────────────────────────────────────────────────
+    # ── 4. THREE TEMPLATES ────────────────────────────────────────────────
     section("🏅 Three week templates, ranked by what followed")
     P = iw.prescribed(df_all)
     yt = PL.year_table(df_all, P, None)
@@ -261,7 +365,7 @@ def render(head, ctx):
     tpl = next(t for t in templates
                if f"Option {t['rank']}" == choice)
 
-    # ── 4. INTERVALS.ICU FORMAT ───────────────────────────────────────────
+    # ── 5. INTERVALS.ICU FORMAT ───────────────────────────────────────────
     section("📋 Paste into intervals.icu")
     st.caption(
         "Library > Add workout > paste one block (keep the blank lines — "
@@ -283,15 +387,38 @@ def render(head, ctx):
         date = nxt + pd.Timedelta(days=(order.index(day)
                                         - nxt.dayofweek) % 7)
         dated.append({**s, "day": day, "date": date.date()})
-    for s in dated:
+    # The athlete's own plan beats the template: a block whose day their
+    # calendar already defines is WITHHELD, named, with the calendar's own
+    # workout beside it — never pasted over their session. If the calendar
+    # could not be read (_events is None) nothing is withheld, and the
+    # caption above has already said the plan is unknown.
+    _cal = _events if isinstance(_events, list) else []
+    _plan_dates = {e["date"] for e in _cal if e.get("date")}
+    paste, held = _split_dated(dated, _plan_dates)
+    for s in held:
+        _names = sorted({e["name"] for e in _cal
+                         if e["date"] == str(s["date"]) and e.get("name")})
+        st.caption(
+            f"· {s['date']} ({s['day']}) — block withheld: your calendar "
+            f"already plans {', '.join(_names) or 'that day'} that day "
+            "(your plan wins)")
+    if not paste:
+        callout("Nothing to paste",
+                "Your calendar already plans every day this template would "
+                "use — your week is defined by your own plan above, and the "
+                "template adds nothing to it.",
+                C["green"], icon="✅")
+    for s in paste:
         st.markdown(f"**{s['date']} ({s['day']}) — {s['title']}** · "
                     f"{s['purpose']} · ~{s['total_min']:.0f} min total"
                     + (f" · rest {PL.fmt_dur(s['rest_min'])}"
                        if s["reps"] > 1 else ""))
         st.caption(s["reference"])
         st.code(s["text"], language="text")
-    st.markdown("**Every interval of this week, one row each:**")
-    dataframe(PL.session_table(dated), height=min(420, 60 + 34 * len(dated)))
+    if paste:
+        st.markdown("**Every interval you would paste, one row each:**")
+        dataframe(PL.session_table(paste),
+                  height=min(420, 60 + 34 * len(paste)))
     import numpy as _np
     _acwr_txt = (f"{stt.get('acwr', float('nan')):.2f}"
                  if _np.isfinite(stt.get("acwr", float("nan"))) else "—")

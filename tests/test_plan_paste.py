@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 import streamlit as st  # noqa: E402
+import pandas as pd  # noqa: E402
 
 from core.data import load_data  # noqa: E402
 from views import plan as plan_view  # noqa: E402
@@ -43,19 +44,37 @@ ctx = SimpleNamespace(df_all=df_all, df=df_all, cutoff=None)
 
 _orig_radio = st.radio
 _orig_code = st.code
+_orig_fetch = plan_view.fetch_events_between
 
 
-def render_with(radio_choice):
+def render_with(radio_choice, fetch=None):
+    # The events fetch is stubbed: the template machinery's contract (blocks
+    # always build) must hold regardless of what the live calendar holds —
+    # the WITHHOLDING rule has its own checks below and in
+    # tests.test_plan_calendar. Only when a stub is passed does the page see
+    # that calendar.
     codes = []
-    st.radio = lambda label, options, *a, **k: (
-        radio_choice if radio_choice in list(options) else list(options)[0])
+    split = {"at": None}
+    plan_view.fetch_events_between = fetch or (lambda *a, **k: [])
+
+    def _radio(label, options, *a, **k):
+        # The template radio sits BETWEEN the page's calendar section (which
+        # shows the athlete's own event steps with st.code) and the paste
+        # section. Mark that boundary: paste blocks are the st.code calls
+        # after the radio, the calendar's steps are not paste blocks.
+        split["at"] = len(codes)
+        return radio_choice if radio_choice in list(options) else list(options)[0]
+
+    st.radio = _radio
     st.code = lambda body, *a, **k: codes.append(str(body))
     try:
         plan_view.render(None, ctx)
     finally:
         st.radio = _orig_radio
         st.code = _orig_code
-    return codes
+        plan_view.fetch_events_between = _orig_fetch
+    at = split["at"] if split["at"] is not None else 0
+    return codes[at:]
 
 
 # First pass with the default choice: harvest the option list from the page.
@@ -68,6 +87,7 @@ def _harvest(label, options, *a, **k):
 
 
 st.radio = _harvest
+plan_view.fetch_events_between = lambda *a, **k: []
 codes_default, harvest_err = [], None
 try:
     st.code = lambda body, *a, **k: codes_default.append(str(body))
@@ -77,6 +97,7 @@ except Exception as e:                                       # noqa: BLE001
 finally:
     st.radio = _orig_radio
     st.code = _orig_code
+    plan_view.fetch_events_between = _orig_fetch
 
 check("the plan page renders headless with no credentials",
       harvest_err is None, harvest_err)
@@ -109,6 +130,23 @@ for opt in seen_options:
         check(f"{opt} block {i + 1} main-set steps carry watts",
               len(work) > 0 and all(bool(STEPW.search(s)) for s in work),
               work[:3])
+
+print()
+
+
+def _full_calendar(date_from, date_to):
+    """A calendar that plans EVERY day of the requested window."""
+    return [{"id": i + 1, "date": str(d.date()), "name": "AEROBIC BASE",
+             "description": "", "paired_activity_id": None}
+            for i, d in enumerate(pd.date_range(date_from, date_to))]
+
+
+if seen_options:
+    _opt = seen_options[0]
+    _withheld = render_with(_opt, fetch=_full_calendar)
+    check("a calendar that plans every day withholds every paste block",
+          len(_withheld) == 0,
+          f"{len(_withheld)} block(s) pasted over a fully planned week")
 
 print()
 if FAILED:
